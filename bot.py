@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = os.getenv("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")
+GROQ_API_KEY = os.getenv("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")
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
