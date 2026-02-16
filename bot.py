@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ С КРАСИВЫМ ФОРМАТИРОВАНИЕМ
+# bot.py - С РАССЫЛКОЙ ПО РАСПИСАНИЮ
 
 import os
 import asyncio
 import logging
 import requests
 from groq import Groq
+from datetime import datetime, time
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, Bot
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -26,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # ================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.getenv("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")
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
@@ -164,7 +167,6 @@ def format_weather_text(payload: dict) -> str:
     else:
         advice = "👕 Тепло. Легкая одежда подойдет."
     
-    # Формируем красивый ответ с эмодзи и переносами строк
     text = (
         f"📍 *{payload['location_short']}*\n\n"
         f"🌡️ *Сейчас:* {payload['temp_now']}°C {payload['weather_desc']}{feels_text}\n\n"
@@ -174,29 +176,110 @@ def format_weather_text(payload: dict) -> str:
     )
     return text
 
-async def get_groq_weather(payload: dict) -> str | None:
-    """Получение красивого описания от Groq"""
-    system = (
-        "Ты дружелюбный помощник, который дает прогноз погоды. "
-        "Твои ответы должны быть:\n"
-        "- Информативными (температура, осадки, ощущения)\n"
-        "- Разбитыми на абзацы (используй \\n\\n)\n"
-        "- С дружелюбным тоном\n"
-        "- Без markdown, только текст\n\n"
-        "ПРИМЕР:\n"
-        "В Москве сейчас −5°C и снежно. Ощущается как −10°C.\n\n"
-        "В течение дня: от −8°C до −2°C. Ожидается небольшой снег.\n\n"
-        "Одевайтесь теплее и будьте осторожны на дорогах!"
+def format_morning_text(payload: dict) -> str:
+    """Утреннее приветствие с прогнозом"""
+    # Мотивирующие фразы
+    morning_phrases = [
+        "☀️ Доброе утро!",
+        "🌅 С добрым утром!",
+        "☀️ Просыпайтесь!",
+        "🌤 Хорошего утра!",
+        "☀️ Новый день начинается!",
+    ]
+    import random
+    greeting = random.choice(morning_phrases)
+    
+    # Короткий прогноз
+    temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
+    
+    weather_icon = "☀️" if payload['temp_now'] > 0 else "❄️"
+    
+    text = (
+        f"{greeting}\n\n"
+        f"📅 *Прогноз на сегодня:*\n"
+        f"{weather_icon} {payload['weather_desc']}\n"
+        f"🌡️ Средняя температура: {temp_avg}°C\n"
+        f"💧 Осадки: {payload['precip']} мм\n\n"
+        f"💪 Хорошего продуктивного дня!"
     )
+    return text
 
-    user = (
-        f"Данные о погоде для {payload['location_short']}:\n"
-        f"Сейчас: {payload['temp_now']}°C, ощущается как {payload['feels_like']}°C\n"
-        f"Состояние: {payload['weather_desc']}\n"
-        f"Сегодня: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
-        f"Осадки: {payload['precip']} мм\n"
-        f"Сформируй короткий прогноз из 3-4 предложений, разделенных пустыми строками."
+def format_evening_text(payload: dict) -> str:
+    """Вечернее пожелание"""
+    # Ласковые слова
+    evening_phrases = [
+        "🌙 Спокойной ночи!",
+        "✨ Доброй ночи!",
+        "🌙 Сладких снов!",
+        "⭐ Хорошего отдыха!",
+        "🌙 Приятных сновидений!",
+    ]
+    import random
+    greeting = random.choice(evening_phrases)
+    
+    # Милые дополнения
+    sweet_words = [
+        "Пусть завтрашний день будет лучше сегодняшнего! 🌟",
+        "Отдыхайте, вы сегодня отлично поработали! 💫",
+        "Сны пусть будут только радужными! 🌈",
+        "Завтра ждет новый день и новые победы! ⭐",
+        "Вы сегодня были великолепны! 💖",
+    ]
+    sweet = random.choice(sweet_words)
+    
+    # Короткий прогноз на завтра (для вечера)
+    tomorrow_temp = (payload['temp_min'] + payload['temp_max']) // 2
+    
+    text = (
+        f"{greeting}\n\n"
+        f"📊 *Сегодня было:*\n"
+        f"🌡️ {payload['temp_now']}°C, {payload['weather_desc']}\n\n"
+        f"💫 *На завтра:* примерно {tomorrow_temp}°C\n\n"
+        f"{sweet}"
     )
+    return text
+
+async def get_groq_weather(payload: dict, text_type: str = "normal") -> str | None:
+    """Получение красивого описания от Groq"""
+    
+    if text_type == "morning":
+        system = (
+            "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды на сегодня. "
+            "Используй данные о погоде: температуру, осадки. Добавь мотивирующую фразу. "
+            "Ответ должен быть 3-4 предложения, разделенных пустыми строками."
+        )
+        user = (
+            f"Данные о погоде для {payload['location_short']}:\n"
+            f"Сейчас: {payload['temp_now']}°C\n"
+            f"Состояние: {payload['weather_desc']}\n"
+            f"Сегодня: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
+            f"Осадки: {payload['precip']} мм\n"
+            f"Напиши утреннее приветствие с прогнозом."
+        )
+    elif text_type == "evening":
+        system = (
+            "Ты нежный и заботливый. Напиши короткое вечернее пожелание спокойной ночи. "
+            "Упомяни погоду сегодня и коротко на завтра. Добавь ласковые слова. "
+            "Ответ должен быть 3-4 предложения."
+        )
+        user = (
+            f"Данные о погоде для {payload['location_short']}:\n"
+            f"Сейчас: {payload['temp_now']}°C, {payload['weather_desc']}\n"
+            f"Завтра ожидается: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
+            f"Напиши вечернее пожелание."
+        )
+    else:
+        system = (
+            "Ты дружелюбный помощник. Дай прогноз погоды из 3-4 предложений, "
+            "разделенных пустыми строками. Без markdown."
+        )
+        user = (
+            f"Данные о погоде для {payload['location_short']}:\n"
+            f"Сейчас: {payload['temp_now']}°C, ощущается как {payload['feels_like']}°C\n"
+            f"Состояние: {payload['weather_desc']}\n"
+            f"Сегодня: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
+            f"Осадки: {payload['precip']} мм"
+        )
 
     try:
         completion = groq_client.chat.completions.create(
@@ -213,6 +296,83 @@ async def get_groq_weather(payload: dict) -> str | None:
         logger.error(f"Ошибка Groq API: {e}")
         return None
 
+# ================== ФУНКЦИИ РАССЫЛКИ ==================
+async def send_morning_forecast(bot: Bot):
+    """Утренняя рассылка в 8:00"""
+    logger.info("⏰ Запуск утренней рассылки")
+    
+    if not user_cities:
+        logger.info("Нет пользователей для рассылки")
+        return
+    
+    for user_id, city in user_cities.items():
+        try:
+            logger.info(f"Отправляем утренний прогноз для пользователя {user_id}, город {city}")
+            
+            # Получаем погоду
+            geo = geocode_city(city)
+            if not geo:
+                continue
+                
+            wx = fetch_today_weather(geo["latitude"], geo["longitude"])
+            payload = build_weather_payload(geo.get("name", city), geo, wx)
+            
+            # Пробуем получить от Groq
+            text = await get_groq_weather(payload, "morning")
+            
+            if not text:
+                # Запасной вариант
+                text = format_morning_text(payload)
+            
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode='Markdown'
+            )
+            logger.info(f"✅ Утренний прогноз отправлен пользователю {user_id}")
+            await asyncio.sleep(0.5)  # Небольшая задержка между сообщениями
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отправке утреннего прогноза пользователю {user_id}: {e}")
+
+async def send_evening_message(bot: Bot):
+    """Вечерняя рассылка в 22:00"""
+    logger.info("🌙 Запуск вечерней рассылки")
+    
+    if not user_cities:
+        logger.info("Нет пользователей для рассылки")
+        return
+    
+    for user_id, city in user_cities.items():
+        try:
+            logger.info(f"Отправляем вечернее пожелание пользователю {user_id}")
+            
+            # Получаем погоду
+            geo = geocode_city(city)
+            if not geo:
+                continue
+                
+            wx = fetch_today_weather(geo["latitude"], geo["longitude"])
+            payload = build_weather_payload(geo.get("name", city), geo, wx)
+            
+            # Пробуем получить от Groq
+            text = await get_groq_weather(payload, "evening")
+            
+            if not text:
+                # Запасной вариант
+                text = format_evening_text(payload)
+            
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode='Markdown'
+            )
+            logger.info(f"✅ Вечернее сообщение отправлено пользователю {user_id}")
+            await asyncio.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отправке вечернего сообщения пользователю {user_id}: {e}")
+
 # ================== ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка /start"""
@@ -227,7 +387,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"👋 *Привет, {user.first_name}!*\n\n"
         f"Я помогу узнать погоду в любом городе.\n"
-        f"Просто напиши название города или используй кнопки ниже.",
+        f"Просто напиши название города или используй кнопки ниже.\n\n"
+        f"⏰ *Бонус:* Я буду сам присылать прогноз в 8:00 и желать спокойной ночи в 22:00!",
         reply_markup=keyboard,
         parse_mode='Markdown'
     )
@@ -288,29 +449,23 @@ async def send_weather(update: Update, city: str):
     user = update.effective_user
     
     try:
-        # Получаем координаты
         geo = geocode_city(city)
         if not geo:
             await update.message.reply_text(
-                f"❌ Город *'{city}'* не найден.\n\nПопробуйте написать по-другому (например, 'Москва' вместо 'Moscow').",
+                f"❌ Город *'{city}'* не найден.\n\nПопробуйте написать по-другому.",
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
             return
         
-        # Получаем погоду
         wx = fetch_today_weather(geo["latitude"], geo["longitude"])
-        
-        # Формируем данные
         payload = build_weather_payload(geo.get("name", city), geo, wx)
         
-        # Пробуем получить ответ от Groq
-        groq_text = await get_groq_weather(payload)
+        groq_text = await get_groq_weather(payload, "normal")
         
-        if groq_text and len(groq_text.split()) > 10:  # Если ответ содержательный
+        if groq_text and len(groq_text.split()) > 10:
             final_text = groq_text
         else:
-            # Используем запасной вариант
             final_text = format_weather_text(payload)
         
         logger.info(f"✅ Отправляем прогноз для @{user.username}")
@@ -320,18 +475,10 @@ async def send_weather(update: Update, city: str):
             parse_mode='Markdown'
         )
         
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Ошибка сети: {e}")
-        await update.message.reply_text(
-            "❌ Ошибка при получении данных погоды.\n"
-            "Сервер погоды временно недоступен. Попробуйте позже.",
-            reply_markup=keyboard
-        )
     except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка: {e}")
         await update.message.reply_text(
-            "❌ Произошла внутренняя ошибка.\n"
-            "Попробуйте еще раз через несколько минут.",
+            "❌ Произошла ошибка. Попробуйте позже.",
             reply_markup=keyboard
         )
 
@@ -354,7 +501,31 @@ async def main():
     await app.start()
     await app.updater.start_polling()
     
-    logger.info("✅ Бот успешно запущен и готов к работе!")
+    logger.info("✅ Бот запущен")
+    
+    # ===== НАСТРАИВАЕМ РАСПИСАНИЕ =====
+    scheduler = AsyncIOScheduler()
+    
+    # Утренняя рассылка в 8:00
+    scheduler.add_job(
+        send_morning_forecast,
+        CronTrigger(hour=8, minute=0),
+        args=[app.bot],
+        id="morning_forecast"
+    )
+    logger.info("⏰ Запланирована утренняя рассылка на 8:00")
+    
+    # Вечерняя рассылка в 22:00
+    scheduler.add_job(
+        send_evening_message,
+        CronTrigger(hour=22, minute=0),
+        args=[app.bot],
+        id="evening_message"
+    )
+    logger.info("⏰ Запланирована вечерняя рассылка на 22:00")
+    
+    scheduler.start()
+    logger.info("⏰ Планировщик запущен")
     
     # Держим бота запущенным
     try:
@@ -363,6 +534,7 @@ async def main():
     except asyncio.CancelledError:
         pass
     finally:
+        scheduler.shutdown()
         await app.stop()
 
 # ================== ТОЧКА ВХОДА ==================
