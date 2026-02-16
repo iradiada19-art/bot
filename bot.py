@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
+# bot.py - ПОЛНАЯ ВЕРСИЯ С GROQ И МОСКОВСКИМ ВРЕМЕНЕМ
 
 import json
 import os
@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 from groq import Groq
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
+from pytz import timezone
+import pytz
 
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -32,13 +33,17 @@ logger = logging.getLogger(__name__)
 
 # ================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
     raise RuntimeError("TELEGRAM_BOT_TOKEN обязательно должен быть задан")
 
 logger.info("✅ Токены успешно загружены")
+
+# ================== ЧАСОВОЙ ПОЯС ==================
+MSK_TZ = timezone('Europe/Moscow')
+logger.info(f"🕐 Часовой пояс: {MSK_TZ}")
 
 # ================== ФАЙЛ ДЛЯ СОХРАНЕНИЯ ==================
 REMINDERS_FILE = "/tmp/reminders.json"
@@ -61,7 +66,7 @@ reminders_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Инициализация Groq клиента (может не работать)
+# Инициализация Groq клиента
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
     logger.info("✅ Groq клиент инициализирован")
@@ -77,7 +82,7 @@ reminder_counter = 0
 # Состояния пользователей
 user_state = {}  # {user_id: "main" или "reminders"}
 
-# Планировщик (будет инициализирован в main)
+# Планировщик
 scheduler = None
 
 # Словарь кодов погоды на русском
@@ -210,7 +215,7 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     }
 
 def format_weather_text(payload: dict) -> str:
-    """Форматирование текста погоды (без Groq)"""
+    """Форматирование текста погоды (запасной вариант)"""
     feels = payload['feels_like']
     feels_text = f" (ощущается как {feels}°C)" if feels else ""
     
@@ -237,7 +242,7 @@ def format_weather_text(payload: dict) -> str:
     )
 
 def format_morning_text(payload: dict) -> str:
-    """Утреннее приветствие"""
+    """Утреннее приветствие (запасной вариант)"""
     import random
     phrases = ["☀️ Доброе утро!", "🌅 С добрым утром!", "☀️ Просыпайся!"]
     temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
@@ -251,7 +256,7 @@ def format_morning_text(payload: dict) -> str:
     )
 
 def format_evening_text(payload: dict) -> str:
-    """Вечернее пожелание"""
+    """Вечернее пожелание (запасной вариант)"""
     import random
     phrases = ["🌙 Спокойной ночи!", "✨ Доброй ночи!", "🌙 Сладких снов!"]
     sweet = ["Сны пусть будут радужными! 🌈", "Отдыхай! 💫", "До завтра! ⭐"]
@@ -264,7 +269,35 @@ def format_evening_text(payload: dict) -> str:
     )
 
 async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
-    """Получение текста погоды (без Groq из-за ошибки 403)"""
+    """Получение текста погоды (с Groq если доступен)"""
+    # Пробуем получить через Groq
+    if groq_client:
+        try:
+            if text_type == "morning":
+                system = "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды. Используй данные о погоде. Ответ должен быть тёплым и дружелюбным."
+                user = f"В {payload['location_short']} сегодня {payload['temp_min']}-{payload['temp_max']}°C, {payload['weather_desc']}, осадки {payload['precip']} мм."
+            elif text_type == "evening":
+                system = "Ты нежный и заботливый. Напиши вечернее пожелание спокойной ночи. Упомяни погоду сегодня и коротко на завтра. Добавь ласковые слова."
+                user = f"Сегодня было {payload['temp_now']}°C, {payload['weather_desc']}. Завтра {payload['temp_min']}-{payload['temp_max']}°C."
+            else:
+                system = "Ты дружелюбный помощник. Дай прогноз погоды на сегодня. Используй данные о температуре, осадках и ощущениях."
+                user = f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, ощущается как {payload['feels_like']}°C. Днем {payload['temp_min']}-{payload['temp_max']}°C, осадки {payload['precip']} мм."
+
+            completion = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.7,
+                max_tokens=200,
+            )
+            groq_text = completion.choices[0].message.content.strip()
+            if groq_text and len(groq_text) > 20:
+                logger.info(f"✅ Получен ответ от Groq для {text_type}")
+                return groq_text
+        except Exception as e:
+            logger.error(f"❌ Ошибка Groq: {e}")
+    
+    # Запасной вариант (локальное форматирование)
+    logger.info(f"📝 Используем локальное форматирование для {text_type}")
     if text_type == "morning":
         return format_morning_text(payload)
     elif text_type == "evening":
@@ -274,47 +307,62 @@ async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
 
 # ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
 def parse_time(text: str) -> datetime | None:
-    """Парсинг времени из текста"""
-    now = datetime.now()
+    """Парсинг времени из текста с учетом московского времени"""
+    now = datetime.now(MSK_TZ)
     text = text.lower().strip()
     
     # Сегодня в 15:30
     if 'сегодня' in text:
         match = re.search(r'(\d{1,2}):(\d{2})', text)
         if match:
-            return now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0)
+            result = now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0)
+            logger.info(f"🕐 Парсинг 'сегодня': {result}")
+            return result
     
     # Завтра в 9
     if 'завтра' in text:
         match = re.search(r'(\d{1,2})', text)
         if match:
-            return (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0)
+            result = (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0, microsecond=0)
+            logger.info(f"🕐 Парсинг 'завтра': {result}")
+            return result
     
     # Через N часов
     match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
     if match:
-        return now + timedelta(hours=int(match.group(1)))
+        result = now + timedelta(hours=int(match.group(1)))
+        logger.info(f"🕐 Парсинг 'через N часов': {result}")
+        return result
     
     # Через час
     if 'через час' in text:
-        return now + timedelta(hours=1)
+        result = now + timedelta(hours=1)
+        logger.info(f"🕐 Парсинг 'через час': {result}")
+        return result
     
     # Через N минут
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
     if match:
-        return now + timedelta(minutes=int(match.group(1)))
+        result = now + timedelta(minutes=int(match.group(1)))
+        logger.info(f"🕐 Парсинг 'через N минут': {result}")
+        return result
     
     # Через минуту
     if 'через минуту' in text:
-        return now + timedelta(minutes=1)
+        result = now + timedelta(minutes=1)
+        logger.info(f"🕐 Парсинг 'через минуту': {result}")
+        return result
     
     # Просто время 15:30
     match = re.search(r'^(\d{1,2}):(\d{2})$', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
-        candidate = now.replace(hour=hour, minute=minute, second=0)
-        return candidate if candidate > now else candidate + timedelta(days=1)
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        result = candidate if candidate > now else candidate + timedelta(days=1)
+        logger.info(f"🕐 Парсинг 'просто время': {result}")
+        return result
     
+    logger.warning(f"❌ Не удалось распарсить время: '{text}'")
     return None
 
 async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
@@ -337,8 +385,13 @@ async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
 # ================== РАССЫЛКИ ==================
 async def send_morning_forecast(bot):
     """Утренняя рассылка в 8:00"""
+    now = datetime.now(MSK_TZ)
+    logger.info(f"⏰ Утренняя рассылка в {now.strftime('%H:%M')}")
+    
     if not user_cities:
+        logger.info("Нет пользователей для рассылки")
         return
+    
     for user_id, city in user_cities.items():
         try:
             geo = geocode_city(city)
@@ -354,8 +407,13 @@ async def send_morning_forecast(bot):
 
 async def send_evening_message(bot):
     """Вечерняя рассылка в 22:00"""
+    now = datetime.now(MSK_TZ)
+    logger.info(f"🌙 Вечерняя рассылка в {now.strftime('%H:%M')}")
+    
     if not user_cities:
+        logger.info("Нет пользователей для рассылки")
         return
+    
     for user_id, city in user_cities.items():
         try:
             geo = geocode_city(city)
@@ -376,7 +434,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     logger.info(f"👉 /start от @{user.username}")
     
-    # Сбрасываем состояние
     user_state[user_id] = "main"
     if user_id in context.user_data:
         context.user_data.clear()
@@ -400,9 +457,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"📨 Сообщение от @{user.username}: '{text}'")
     
-    # ===== ГЛАВНЫЕ КНОПКИ (всегда работают) =====
+    # ===== ГЛАВНЫЕ КНОПКИ =====
     if text == BTN_START:
-        logger.info("🔴 Главное меню: Старт")
+        logger.info("🔴 Старт")
         user_state[user_id] = "main"
         if user_id in user_cities:
             del user_cities[user_id]
@@ -410,7 +467,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if text == BTN_UPDATE:
-        logger.info("🟢 Главное меню: Обновить")
+        logger.info("🟢 Обновить прогноз")
         user_state[user_id] = "main"
         if user_id not in user_cities:
             await update.message.reply_text("Сначала введи город!", reply_markup=main_keyboard)
@@ -420,7 +477,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if text == BTN_REMINDERS:
-        logger.info("🔵 Главное меню: Напоминания")
+        logger.info("🔵 Мои напоминания")
         user_state[user_id] = "reminders"
         await update.message.reply_text(
             "📌 *Напоминания*\n\nВыбери действие:", 
@@ -429,17 +486,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # ===== ЕСЛИ МЫ В РЕЖИМЕ НАПОМИНАНИЙ =====
+    # ===== РЕЖИМ НАПОМИНАНИЙ =====
     if user_state.get(user_id) == "reminders":
         
         if text == "🔙 Назад":
-            logger.info("◀️ Назад в главное меню")
+            logger.info("◀️ Назад")
             user_state[user_id] = "main"
             await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
             return
         
         if text == "📝 Создать":
-            logger.info("📝 Создание напоминания")
+            logger.info("📝 Создать напоминание")
             await update.message.reply_text(
                 "🕐 *Создание напоминания*\n\n"
                 "Формат: `Текст | время`\n\n"
@@ -454,27 +511,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if text == "📋 Список":
-            logger.info("📋 Просмотр списка")
+            logger.info("📋 Список напоминаний")
             if user_id not in user_reminders or not user_reminders[user_id]:
                 await update.message.reply_text("📋 У тебя нет напоминаний.", reply_markup=reminders_keyboard)
                 return
             
             response = "📋 *Твои напоминания:*\n\n"
             for i, rem in enumerate(user_reminders[user_id], 1):
-                t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
+                rem_time = datetime.fromisoformat(rem['time'])
+                if rem_time.tzinfo is None:
+                    rem_time = MSK_TZ.localize(rem_time)
+                t = rem_time.strftime("%d.%m %H:%M")
                 response += f"{i}. 🕐 *{t}*\n   {rem['text']}\n\n"
             
             await update.message.reply_text(response, parse_mode='Markdown', reply_markup=reminders_keyboard)
             return
         
         if text == "❌ Удалить":
-            logger.info("❌ Удаление")
+            logger.info("❌ Удалить напоминание")
             if user_id not in user_reminders or not user_reminders[user_id]:
                 await update.message.reply_text("Нет напоминаний.", reply_markup=reminders_keyboard)
                 return
             kb = []
             for rem in user_reminders[user_id]:
-                t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
+                rem_time = datetime.fromisoformat(rem['time'])
+                if rem_time.tzinfo is None:
+                    rem_time = MSK_TZ.localize(rem_time)
+                t = rem_time.strftime("%d.%m %H:%M")
                 kb.append([f"❌ {t} - {rem['text'][:15]}"])
             kb.append(["🔙 Назад"])
             await update.message.reply_text(
@@ -504,7 +567,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             global reminder_counter
             reminder_counter += 1
             
-            # Используем глобальный планировщик
             global scheduler
             if scheduler:
                 job = scheduler.add_job(
@@ -545,7 +607,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if user_id in user_reminders:
                 for rem in user_reminders[user_id][:]:
-                    preview = f"❌ {datetime.fromisoformat(rem['time']).strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
+                    rem_time = datetime.fromisoformat(rem['time'])
+                    if rem_time.tzinfo is None:
+                        rem_time = MSK_TZ.localize(rem_time)
+                    preview = f"❌ {rem_time.strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
                     if preview == text:
                         try:
                             if scheduler:
@@ -562,11 +627,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['deleting_reminder'] = False
             return
         
-        # Если мы в режиме напоминаний, но команда не распознана
         await update.message.reply_text("Используй кнопки меню напоминаний.", reply_markup=reminders_keyboard)
         return
     
-    # ===== ЕСЛИ МЫ В РЕЖИМЕ ПОГОДЫ (ВВОД ГОРОДА) =====
+    # ===== ВВОД ГОРОДА =====
     logger.info(f"🏙️ Ввод города: {text}")
     user_state[user_id] = "main"
     user_cities[user_id] = text
@@ -609,18 +673,21 @@ async def main():
     await app.updater.start_polling()
     
     # Создаем планировщик
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0), args=[app.bot])
-    scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0), args=[app.bot])
+    scheduler = AsyncIOScheduler(timezone=str(MSK_TZ))
+    scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0, timezone=MSK_TZ), args=[app.bot])
+    scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0, timezone=MSK_TZ), args=[app.bot])
     scheduler.start()
     
-    # Восстанавливаем напоминания в планировщике
+    # Восстанавливаем напоминания
     restored = 0
     for user_id, reminders in user_reminders.items():
         for rem in reminders:
             try:
                 reminder_time = datetime.fromisoformat(rem['time'])
-                if reminder_time > datetime.now():
+                if reminder_time.tzinfo is None:
+                    reminder_time = MSK_TZ.localize(reminder_time)
+                
+                if reminder_time > datetime.now(MSK_TZ):
                     job = scheduler.add_job(
                         send_reminder,
                         'date',
@@ -631,7 +698,6 @@ async def main():
                     rem['job_id'] = job.id
                     restored += 1
                 else:
-                    # Удаляем просроченные
                     user_reminders[user_id].remove(rem)
             except Exception as e:
                 logger.error(f"❌ Ошибка восстановления: {e}")
