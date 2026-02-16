@@ -35,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
 GROQ_API_KEY = "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"
 
 # Проверяем наличие токенов
