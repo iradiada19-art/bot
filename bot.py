@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ПОЛНАЯ ВЕРСИЯ С СОХРАНЕНИЕМ НАПОМИНАНИЙ
+# bot.py - ИСПРАВЛЕННЫЙ ПОРЯДОК ПРОВЕРОК
 
 import json
 import os
@@ -43,6 +43,10 @@ if not GROQ_API_KEY:
 
 logger.info("✅ Токены успешно загружены")
 
+# ================== ФАЙЛ ДЛЯ СОХРАНЕНИЯ ==================
+REMINDERS_FILE = "/tmp/reminders.json"  # Для Bothost
+logger.info(f"📁 Файл напоминаний: {REMINDERS_FILE}")
+
 # ================== КОНСТАНТЫ ==================
 BTN_START = "Старт"
 BTN_UPDATE = "Обновить прогноз"
@@ -54,6 +58,12 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# Клавиатура меню напоминаний
+reminders_keyboard = ReplyKeyboardMarkup(
+    [["📝 Создать", "📋 Список"], ["❌ Удалить", "🔙 Назад"]],
+    resize_keyboard=True
+)
+
 # Инициализация Groq клиента
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -62,8 +72,8 @@ user_cities = {}  # {user_id: city_name}
 user_reminders = {}  # {user_id: [{"id": 1, "text": "...", "time": "...", "job_id": "..."}]}
 reminder_counter = 0
 
-# Файл для сохранения напоминаний
-REMINDERS_FILE = "reminders.json"
+# Состояния пользователей
+user_state = {}  # {user_id: "main" или "reminders"}
 
 # Словарь кодов погоды на русском
 WEATHER_CODE_RU = {
@@ -97,11 +107,18 @@ WEATHER_CODE_RU = {
 def save_reminders():
     """Сохраняет напоминания в файл"""
     try:
+        save_data = {}
+        for uid, reminders in user_reminders.items():
+            save_data[str(uid)] = reminders
+        
         with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(user_reminders, f, ensure_ascii=False, indent=2)
-        logger.info("💾 Напоминания сохранены")
+            json.dump(save_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"💾 Напоминания сохранены. Всего: {sum(len(v) for v in user_reminders.values())}")
+        return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
+        return False
 
 def load_reminders():
     """Загружает напоминания из файла"""
@@ -109,18 +126,20 @@ def load_reminders():
     try:
         if os.path.exists(REMINDERS_FILE):
             with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
-                user_reminders = json.load(f)
-            # Конвертируем строковые ключи обратно в int
-            user_reminders = {int(k): v for k, v in user_reminders.items()}
+                save_data = json.load(f)
             
-            # Находим максимальный ID для счетчика
+            user_reminders = {int(k): v for k, v in save_data.items()}
+            
             max_id = 0
             for reminders in user_reminders.values():
                 for rem in reminders:
                     if rem['id'] > max_id:
                         max_id = rem['id']
             reminder_counter = max_id
-            logger.info(f"📂 Загружено напоминаний: {sum(len(v) for v in user_reminders.values())}")
+            
+            logger.info(f"✅ Загружено напоминаний: {sum(len(v) for v in user_reminders.values())}")
+        else:
+            user_reminders = {}
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
         user_reminders = {}
@@ -192,9 +211,9 @@ def format_weather_text(payload: dict) -> str:
     
     temp = payload['temp_now']
     if temp < -20:
-        advice = "🥶 Очень холодно! Одевайтесь максимально тепло."
+        advice = "🥶 Очень холодно! Одевайся максимально тепло."
     elif temp < -10:
-        advice = "🧥 Холодно. Не забудьте шапку и перчатки."
+        advice = "🧥 Холодно. Не забудь шапку и перчатки."
     elif temp < 0:
         advice = "🧥 Прохладно. Лучше надеть куртку."
     elif temp < 10:
@@ -215,7 +234,7 @@ def format_weather_text(payload: dict) -> str:
 def format_morning_text(payload: dict) -> str:
     """Утреннее приветствие"""
     import random
-    phrases = ["☀️ Доброе утро!", "🌅 С добрым утром!", "☀️ Просыпайтесь!"]
+    phrases = ["☀️ Доброе утро!", "🌅 С добрым утром!", "☀️ Просыпайся!"]
     temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
     return (
         f"{random.choice(phrases)}\n\n"
@@ -230,7 +249,7 @@ def format_evening_text(payload: dict) -> str:
     """Вечернее пожелание"""
     import random
     phrases = ["🌙 Спокойной ночи!", "✨ Доброй ночи!", "🌙 Сладких снов!"]
-    sweet = ["Сны пусть будут радужными! 🌈", "Отдыхайте! 💫", "До завтра! ⭐"]
+    sweet = ["Сны пусть будут радужными! 🌈", "Отдыхай! 💫", "До завтра! ⭐"]
     tomorrow_temp = (payload['temp_min'] + payload['temp_max']) // 2
     return (
         f"{random.choice(phrases)}\n\n"
@@ -286,10 +305,18 @@ def parse_time(text: str) -> datetime | None:
     if match:
         return now + timedelta(hours=int(match.group(1)))
     
+    # Через час
+    if 'через час' in text:
+        return now + timedelta(hours=1)
+    
     # Через N минут
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
     if match:
         return now + timedelta(minutes=int(match.group(1)))
+    
+    # Через минуту
+    if 'через минуту' in text:
+        return now + timedelta(minutes=1)
     
     # Просто время 15:30
     match = re.search(r'^(\d{1,2}):(\d{2})$', text)
@@ -310,7 +337,6 @@ async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
         )
         logger.info(f"✅ Напоминание {reminder_id} отправлено")
         
-        # Удаляем из словаря
         if user_id in user_reminders:
             user_reminders[user_id] = [r for r in user_reminders[user_id] if r['id'] != reminder_id]
             save_reminders()
@@ -357,13 +383,21 @@ async def send_evening_message(bot):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка /start"""
     user = update.effective_user
+    user_id = user.id
     logger.info(f"👉 /start от @{user.username}")
+    
+    # Сбрасываем состояние
+    user_state[user_id] = "main"
+    if user_id in context.user_data:
+        context.user_data.clear()
+    
     await update.message.reply_text(
         f"👋 *Привет, {user.first_name}!*\n\n"
         f"Я бот-помощник. Умею:\n"
         f"• Показывать погоду 🌤️\n"
         f"• Создавать напоминания ⏰\n"
-        f"• Присылать прогноз в 8:00 и 22:00",
+        f"• Присылать прогноз в 8:00 и 22:00"\n"
+        f"• И желать доброго утра,
         reply_markup=main_keyboard,
         parse_mode='Markdown'
     )
@@ -376,145 +410,169 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"📨 Сообщение от @{user.username}: '{text}'")
     
-    # ===== ГЛАВНОЕ МЕНЮ =====
+    # ===== ГЛАВНЫЕ КНОПКИ (всегда работают) =====
     if text == BTN_START:
+        logger.info("🔴 Главное меню: Старт")
+        user_state[user_id] = "main"
         if user_id in user_cities:
             del user_cities[user_id]
-        await update.message.reply_text("Введите название города:", reply_markup=main_keyboard)
+        await update.message.reply_text("Введи название города:", reply_markup=main_keyboard)
         return
     
     if text == BTN_UPDATE:
+        logger.info("🟢 Главное меню: Обновить")
+        user_state[user_id] = "main"
         if user_id not in user_cities:
-            await update.message.reply_text("Сначала введите город!", reply_markup=main_keyboard)
+            await update.message.reply_text("Сначала введи город!", reply_markup=main_keyboard)
             return
-        await update.message.reply_text(f"Обновляю прогноз...", reply_markup=main_keyboard)
+        await update.message.reply_text(f"🔄 Обновляю прогноз...", reply_markup=main_keyboard)
         await send_weather(update, user_cities[user_id])
         return
     
     if text == BTN_REMINDERS:
-        menu = ReplyKeyboardMarkup(
-            [["📝 Создать", "📋 Список"], ["❌ Удалить", "🔙 Назад"]],
-            resize_keyboard=True
-        )
-        await update.message.reply_text("📌 *Напоминания*\n\nВыберите действие:", 
-                                      parse_mode='Markdown', reply_markup=menu)
-        return
-    
-    # ===== МЕНЮ НАПОМИНАНИЙ =====
-    if text == "🔙 Назад":
-        await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
-        return
-    
-    if text == "📝 Создать":
+        logger.info("🔵 Главное меню: Напоминания")
+        user_state[user_id] = "reminders"
         await update.message.reply_text(
-            "🕐 *Создание напоминания*\n\n"
-            "Формат: `Текст | время`\n\n"
-            "Примеры:\n"
-            "• `Позвонить маме | 15:30`\n"
-            "• `Выпить таблетки | завтра в 9`\n"
-            "• `Сходить в магазин | через 2 часа`",
-            parse_mode='Markdown'
-        )
-        context.user_data['awaiting_reminder'] = True
-        return
-    
-    if text == "📋 Список":
-        if user_id not in user_reminders or not user_reminders[user_id]:
-            await update.message.reply_text("📋 У вас нет напоминаний.", reply_markup=main_keyboard)
-            return
-        response = "📋 *Ваши напоминания:*\n\n"
-        for i, rem in enumerate(user_reminders[user_id], 1):
-            t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
-            response += f"{i}. 🕐 *{t}*\n   {rem['text']}\n\n"
-        await update.message.reply_text(response, parse_mode='Markdown', reply_markup=main_keyboard)
-        return
-    
-    if text == "❌ Удалить":
-        if user_id not in user_reminders or not user_reminders[user_id]:
-            await update.message.reply_text("Нет напоминаний.", reply_markup=main_keyboard)
-            return
-        kb = []
-        for rem in user_reminders[user_id]:
-            t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
-            kb.append([f"❌ {t} - {rem['text'][:15]}"])
-        kb.append(["🔙 Назад"])
-        await update.message.reply_text("Выберите для удаления:", 
-                                      reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-        context.user_data['deleting_reminder'] = True
-        return
-    
-    # ===== СОЗДАНИЕ НАПОМИНАНИЯ =====
-    if context.user_data.get('awaiting_reminder'):
-        parts = text.split('|')
-        if len(parts) != 2:
-            await update.message.reply_text("❌ Формат: `Текст | время`", parse_mode='Markdown')
-            return
-        
-        reminder_text = parts[0].strip()
-        time_text = parts[1].strip()
-        reminder_time = parse_time(time_text)
-        
-        if not reminder_time:
-            await update.message.reply_text("❌ Не понял время. Попробуйте: 15:30, завтра в 9, через 2 часа")
-            return
-        
-        global reminder_counter
-        reminder_counter += 1
-        
-        job = context.application.scheduler.add_job(
-            send_reminder,
-            'date',
-            run_date=reminder_time,
-            args=[context.application.bot, user_id, reminder_text, reminder_counter]
-        )
-        
-        if user_id not in user_reminders:
-            user_reminders[user_id] = []
-        
-        user_reminders[user_id].append({
-            'id': reminder_counter,
-            'text': reminder_text,
-            'time': reminder_time.isoformat(),
-            'job_id': job.id
-        })
-        
-        save_reminders()
-        
-        context.user_data['awaiting_reminder'] = False
-        await update.message.reply_text(
-            f"✅ *Напоминание создано!*\n\n📝 {reminder_text}\n🕐 {reminder_time.strftime('%d.%m.%Y %H:%M')}",
-            parse_mode='Markdown',
-            reply_markup=main_keyboard
+            "📌 *Напоминания*\n\nВыбери действие:", 
+            parse_mode='Markdown', 
+            reply_markup=reminders_keyboard
         )
         return
     
-    # ===== УДАЛЕНИЕ НАПОМИНАНИЯ =====
-    if context.user_data.get('deleting_reminder'):
+    # ===== ЕСЛИ МЫ В РЕЖИМЕ НАПОМИНАНИЙ =====
+    if user_state.get(user_id) == "reminders":
+        
         if text == "🔙 Назад":
-            context.user_data['deleting_reminder'] = False
+            logger.info("◀️ Назад в главное меню")
+            user_state[user_id] = "main"
             await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
             return
         
-        if user_id in user_reminders:
-            for rem in user_reminders[user_id][:]:
-                preview = f"❌ {datetime.fromisoformat(rem['time']).strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
-                if preview == text:
-                    try:
-                        context.application.scheduler.remove_job(rem['job_id'])
-                    except:
-                        pass
-                    user_reminders[user_id].remove(rem)
-                    save_reminders()
-                    await update.message.reply_text("✅ Удалено!", reply_markup=main_keyboard)
-                    context.user_data['deleting_reminder'] = False
-                    return
+        if text == "📝 Создать":
+            logger.info("📝 Создание напоминания")
+            await update.message.reply_text(
+                "🕐 *Создание напоминания*\n\n"
+                "Формат: `Текст | время`\n\n"
+                "Примеры:\n"
+                "• `Позвонить маме | 15:30`\n"
+                "• `Выпить таблетки | завтра в 9`\n"
+                "• `Сходить в магазин | через 2 часа`\n"
+                "• `Напоминание | через час`",
+                parse_mode='Markdown'
+            )
+            context.user_data['awaiting_reminder'] = True
+            return
         
-        await update.message.reply_text("❌ Не найдено", reply_markup=main_keyboard)
-        context.user_data['deleting_reminder'] = False
+        if text == "📋 Список":
+            logger.info("📋 Просмотр списка")
+            if user_id not in user_reminders or not user_reminders[user_id]:
+                await update.message.reply_text("📋 У тебя нет напоминаний.", reply_markup=reminders_keyboard)
+                return
+            
+            response = "📋 *Ваши напоминания:*\n\n"
+            for i, rem in enumerate(user_reminders[user_id], 1):
+                t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
+                response += f"{i}. 🕐 *{t}*\n   {rem['text']}\n\n"
+            
+            await update.message.reply_text(response, parse_mode='Markdown', reply_markup=reminders_keyboard)
+            return
+        
+        if text == "❌ Удалить":
+            logger.info("❌ Удаление")
+            if user_id not in user_reminders or not user_reminders[user_id]:
+                await update.message.reply_text("Нет напоминаний.", reply_markup=reminders_keyboard)
+                return
+            kb = []
+            for rem in user_reminders[user_id]:
+                t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
+                kb.append([f"❌ {t} - {rem['text'][:15]}"])
+            kb.append(["🔙 Назад"])
+            await update.message.reply_text(
+                "Выберите для удаления:", 
+                reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
+            )
+            context.user_data['deleting_reminder'] = True
+            return
+        
+        # ===== СОЗДАНИЕ НАПОМИНАНИЯ =====
+        if context.user_data.get('awaiting_reminder'):
+            logger.info(f"⏰ Создание: {text}")
+            
+            if '|' not in text:
+                await update.message.reply_text("❌ Формат: `Текст | время`", parse_mode='Markdown')
+                return
+            
+            parts = text.split('|')
+            reminder_text = parts[0].strip()
+            time_text = parts[1].strip()
+            reminder_time = parse_time(time_text)
+            
+            if not reminder_time:
+                await update.message.reply_text("❌ Не понял время. Попробуйте: 15:30, завтра в 9, через 2 часа, через час")
+                return
+            
+            global reminder_counter
+            reminder_counter += 1
+            
+            job = context.application.scheduler.add_job(
+                send_reminder,
+                'date',
+                run_date=reminder_time,
+                args=[context.application.bot, user_id, reminder_text, reminder_counter]
+            )
+            
+            if user_id not in user_reminders:
+                user_reminders[user_id] = []
+            
+            user_reminders[user_id].append({
+                'id': reminder_counter,
+                'text': reminder_text,
+                'time': reminder_time.isoformat(),
+                'job_id': job.id
+            })
+            
+            save_reminders()
+            
+            context.user_data['awaiting_reminder'] = False
+            await update.message.reply_text(
+                f"✅ *Напоминание создано!*\n\n📝 {reminder_text}\n🕐 {reminder_time.strftime('%d.%m.%Y %H:%M')}",
+                parse_mode='Markdown',
+                reply_markup=reminders_keyboard
+            )
+            return
+        
+        # ===== УДАЛЕНИЕ НАПОМИНАНИЯ =====
+        if context.user_data.get('deleting_reminder'):
+            if text == "🔙 Назад":
+                context.user_data['deleting_reminder'] = False
+                await update.message.reply_text("Меню напоминаний:", reply_markup=reminders_keyboard)
+                return
+            
+            if user_id in user_reminders:
+                for rem in user_reminders[user_id][:]:
+                    preview = f"❌ {datetime.fromisoformat(rem['time']).strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
+                    if preview == text:
+                        try:
+                            context.application.scheduler.remove_job(rem['job_id'])
+                        except:
+                            pass
+                        user_reminders[user_id].remove(rem)
+                        save_reminders()
+                        await update.message.reply_text("✅ Удалено!", reply_markup=reminders_keyboard)
+                        context.user_data['deleting_reminder'] = False
+                        return
+            
+            await update.message.reply_text("❌ Не найдено", reply_markup=reminders_keyboard)
+            context.user_data['deleting_reminder'] = False
+            return
+        
+        # Если мы в режиме напоминаний, но команда не распознана
+        await update.message.reply_text("Используй кнопки меню напоминаний.", reply_markup=reminders_keyboard)
         return
     
-    # ===== ВВОД ГОРОДА =====
-    logger.info(f"🏙️ Город: {text}")
+    # ===== ЕСЛИ МЫ В РЕЖИМЕ ПОГОДЫ (ВВОД ГОРОДА) =====
+    logger.info(f"🏙️ Ввод города: {text}")
+    user_state[user_id] = "main"
     user_cities[user_id] = text
     await update.message.reply_text(f"🔍 Ищу погоду для {text}...", reply_markup=main_keyboard)
     await send_weather(update, text)
@@ -559,6 +617,7 @@ async def main():
     scheduler.start()
     
     # Восстанавливаем напоминания в планировщике
+    restored = 0
     for user_id, reminders in user_reminders.items():
         for rem in reminders:
             try:
@@ -572,13 +631,14 @@ async def main():
                         id=rem['job_id']
                     )
                     rem['job_id'] = job.id
-                    logger.info(f"🔄 Восстановлено напоминание {rem['id']} для user {user_id}")
+                    restored += 1
                 else:
                     # Удаляем просроченные
                     user_reminders[user_id].remove(rem)
             except Exception as e:
                 logger.error(f"❌ Ошибка восстановления: {e}")
     
+    logger.info(f"🔄 Восстановлено напоминаний: {restored}")
     save_reminders()
     logger.info("✅ Бот запущен! Планировщик работает.")
     
