@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ПОЛНАЯ ВЕРСИЯ С НАПОМИНАНИЯМИ
+# bot.py - ПОЛНАЯ ВЕРСИЯ С СОХРАНЕНИЕМ НАПОМИНАНИЙ
 
+import json
 import os
 import asyncio
 import logging
@@ -61,6 +62,9 @@ user_cities = {}  # {user_id: city_name}
 user_reminders = {}  # {user_id: [{"id": 1, "text": "...", "time": "...", "job_id": "..."}]}
 reminder_counter = 0
 
+# Файл для сохранения напоминаний
+REMINDERS_FILE = "reminders.json"
+
 # Словарь кодов погоды на русском
 WEATHER_CODE_RU = {
     0: "☀️ ясно",
@@ -88,6 +92,38 @@ WEATHER_CODE_RU = {
     96: "⛈ гроза с градом",
     99: "⛈ сильная гроза",
 }
+
+# ================== ФУНКЦИИ СОХРАНЕНИЯ ==================
+def save_reminders():
+    """Сохраняет напоминания в файл"""
+    try:
+        with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_reminders, f, ensure_ascii=False, indent=2)
+        logger.info("💾 Напоминания сохранены")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения: {e}")
+
+def load_reminders():
+    """Загружает напоминания из файла"""
+    global user_reminders, reminder_counter
+    try:
+        if os.path.exists(REMINDERS_FILE):
+            with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
+                user_reminders = json.load(f)
+            # Конвертируем строковые ключи обратно в int
+            user_reminders = {int(k): v for k, v in user_reminders.items()}
+            
+            # Находим максимальный ID для счетчика
+            max_id = 0
+            for reminders in user_reminders.values():
+                for rem in reminders:
+                    if rem['id'] > max_id:
+                        max_id = rem['id']
+            reminder_counter = max_id
+            logger.info(f"📂 Загружено напоминаний: {sum(len(v) for v in user_reminders.values())}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки: {e}")
+        user_reminders = {}
 
 # ================== ФУНКЦИИ ПОГОДЫ ==================
 def geocode_city(city: str) -> dict | None:
@@ -273,8 +309,12 @@ async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
             parse_mode='Markdown'
         )
         logger.info(f"✅ Напоминание {reminder_id} отправлено")
+        
+        # Удаляем из словаря
         if user_id in user_reminders:
             user_reminders[user_id] = [r for r in user_reminders[user_id] if r['id'] != reminder_id]
+            save_reminders()
+            
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
 
@@ -438,6 +478,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'job_id': job.id
         })
         
+        save_reminders()
+        
         context.user_data['awaiting_reminder'] = False
         await update.message.reply_text(
             f"✅ *Напоминание создано!*\n\n📝 {reminder_text}\n🕐 {reminder_time.strftime('%d.%m.%Y %H:%M')}",
@@ -454,7 +496,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if user_id in user_reminders:
-            for rem in user_reminders[user_id]:
+            for rem in user_reminders[user_id][:]:
                 preview = f"❌ {datetime.fromisoformat(rem['time']).strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
                 if preview == text:
                     try:
@@ -462,6 +504,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except:
                         pass
                     user_reminders[user_id].remove(rem)
+                    save_reminders()
                     await update.message.reply_text("✅ Удалено!", reply_markup=main_keyboard)
                     context.user_data['deleting_reminder'] = False
                     return
@@ -498,6 +541,9 @@ async def send_weather(update: Update, city: str):
 async def main():
     logger.info("🚀 Запуск бота...")
     
+    # Загружаем сохраненные напоминания
+    load_reminders()
+    
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
@@ -512,6 +558,28 @@ async def main():
     scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0), args=[app.bot])
     scheduler.start()
     
+    # Восстанавливаем напоминания в планировщике
+    for user_id, reminders in user_reminders.items():
+        for rem in reminders:
+            try:
+                reminder_time = datetime.fromisoformat(rem['time'])
+                if reminder_time > datetime.now():
+                    job = scheduler.add_job(
+                        send_reminder,
+                        'date',
+                        run_date=reminder_time,
+                        args=[app.bot, user_id, rem['text'], rem['id']],
+                        id=rem['job_id']
+                    )
+                    rem['job_id'] = job.id
+                    logger.info(f"🔄 Восстановлено напоминание {rem['id']} для user {user_id}")
+                else:
+                    # Удаляем просроченные
+                    user_reminders[user_id].remove(rem)
+            except Exception as e:
+                logger.error(f"❌ Ошибка восстановления: {e}")
+    
+    save_reminders()
     logger.info("✅ Бот запущен! Планировщик работает.")
     
     try:
