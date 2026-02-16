@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - РАБОЧАЯ ВЕРСИЯ
+# bot.py - ПОЛНАЯ ВЕРСИЯ С НАПОМИНАНИЯМИ
 
 import os
 import asyncio
 import logging
 import requests
+import re
+from datetime import datetime, timedelta
 from groq import Groq
-from datetime import datetime, time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -44,10 +45,10 @@ logger.info("✅ Токены успешно загружены")
 # ================== КОНСТАНТЫ ==================
 BTN_START = "Старт"
 BTN_UPDATE = "Обновить прогноз"
-BTN_REMINDERS = "Мои напоминания"  # Добавил кнопку напоминаний
+BTN_REMINDERS = "Мои напоминания"
 
-# Создаем клавиатуру
-keyboard = ReplyKeyboardMarkup(
+# Главная клавиатура
+main_keyboard = ReplyKeyboardMarkup(
     [[BTN_START, BTN_UPDATE], [BTN_REMINDERS]],
     resize_keyboard=True,
 )
@@ -55,8 +56,10 @@ keyboard = ReplyKeyboardMarkup(
 # Инициализация Groq клиента
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Словарь для хранения городов пользователей
-user_cities = {}
+# Хранилища данных
+user_cities = {}  # {user_id: city_name}
+user_reminders = {}  # {user_id: [{"id": 1, "text": "...", "time": "...", "job_id": "..."}]}
+reminder_counter = 0
 
 # Словарь кодов погоды на русском
 WEATHER_CODE_RU = {
@@ -121,7 +124,6 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     current = wx.get("current", {}) or {}
     daily = wx.get("daily", {}) or {}
     
-    # Определяем регион и страну
     region_parts = []
     if geo.get('admin1'):
         region_parts.append(geo['admin1'])
@@ -132,7 +134,6 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     if region_parts:
         location_full = f"{city_label}, {', '.join(region_parts)}"
     
-    # Получаем описание погоды с эмодзи
     weather_code = current.get("weather_code")
     weather_desc = WEATHER_CODE_RU.get(weather_code, "🌈 неизвестно")
     
@@ -153,7 +154,6 @@ def format_weather_text(payload: dict) -> str:
     feels = payload['feels_like']
     feels_text = f" (ощущается как {feels}°C)" if feels else ""
     
-    # Определяем рекомендации по одежде
     temp = payload['temp_now']
     if temp < -20:
         advice = "🥶 Очень холодно! Одевайтесь максимально тепло."
@@ -168,118 +168,129 @@ def format_weather_text(payload: dict) -> str:
     else:
         advice = "👕 Тепло. Легкая одежда подойдет."
     
-    text = (
+    return (
         f"📍 *{payload['location_short']}*\n\n"
         f"🌡️ *Сейчас:* {payload['temp_now']}°C {payload['weather_desc']}{feels_text}\n\n"
         f"📊 *Днем:* от {payload['temp_min']}°C до {payload['temp_max']}°C\n\n"
         f"💧 *Осадки:* {payload['precip']} мм\n\n"
         f"💡 *Совет:* {advice}"
     )
-    return text
 
 def format_morning_text(payload: dict) -> str:
-    """Утреннее приветствие с прогнозом"""
+    """Утреннее приветствие"""
     import random
-    morning_phrases = [
-        "☀️ Доброе утро!",
-        "🌅 С добрым утром!",
-        "☀️ Просыпайтесь!",
-        "🌤 Хорошего утра!",
-        "☀️ Новый день начинается!",
-    ]
-    greeting = random.choice(morning_phrases)
-    
+    phrases = ["☀️ Доброе утро!", "🌅 С добрым утром!", "☀️ Просыпайтесь!"]
     temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
-    
-    text = (
-        f"{greeting}\n\n"
+    return (
+        f"{random.choice(phrases)}\n\n"
         f"📅 *Прогноз на сегодня:*\n"
         f"{payload['weather_desc']}\n"
         f"🌡️ Средняя температура: {temp_avg}°C\n"
         f"💧 Осадки: {payload['precip']} мм\n\n"
-        f"💪 Хорошего продуктивного дня!"
+        f"💪 Хорошего дня!"
     )
-    return text
 
 def format_evening_text(payload: dict) -> str:
     """Вечернее пожелание"""
     import random
-    evening_phrases = [
-        "🌙 Спокойной ночи!",
-        "✨ Доброй ночи!",
-        "🌙 Сладких снов!",
-        "⭐ Хорошего отдыха!",
-        "🌙 Приятных сновидений!",
-    ]
-    greeting = random.choice(evening_phrases)
-    
-    sweet_words = [
-        "Пусть завтрашний день будет лучше сегодняшнего! 🌟",
-        "Отдыхайте, вы сегодня отлично поработали! 💫",
-        "Сны пусть будут только радужными! 🌈",
-        "Завтра ждет новый день и новые победы! ⭐",
-        "Вы сегодня были великолепны! 💖",
-    ]
-    sweet = random.choice(sweet_words)
-    
+    phrases = ["🌙 Спокойной ночи!", "✨ Доброй ночи!", "🌙 Сладких снов!"]
+    sweet = ["Сны пусть будут радужными! 🌈", "Отдыхайте! 💫", "До завтра! ⭐"]
     tomorrow_temp = (payload['temp_min'] + payload['temp_max']) // 2
-    
-    text = (
-        f"{greeting}\n\n"
-        f"📊 *Сегодня было:*\n"
-        f"🌡️ {payload['temp_now']}°C, {payload['weather_desc']}\n\n"
-        f"💫 *На завтра:* примерно {tomorrow_temp}°C\n\n"
-        f"{sweet}"
+    return (
+        f"{random.choice(phrases)}\n\n"
+        f"📊 *Сегодня:* {payload['temp_now']}°C, {payload['weather_desc']}\n"
+        f"💫 *Завтра:* ~{tomorrow_temp}°C\n\n"
+        f"{random.choice(sweet)}"
     )
-    return text
 
 async def get_groq_weather(payload: dict, text_type: str = "normal") -> str | None:
-    """Получение красивого описания от Groq"""
-    if text_type == "morning":
-        system = "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды на сегодня."
-        user = f"Данные о погоде для {payload['location_short']}: Сейчас {payload['temp_now']}°C, {payload['weather_desc']}. Сегодня от {payload['temp_min']}°C до {payload['temp_max']}°C, осадки {payload['precip']} мм."
-    elif text_type == "evening":
-        system = "Ты нежный и заботливый. Напиши короткое вечернее пожелание спокойной ночи."
-        user = f"Данные о погоде для {payload['location_short']}: Сейчас {payload['temp_now']}°C, {payload['weather_desc']}. Завтра от {payload['temp_min']}°C до {payload['temp_max']}°C."
-    else:
-        system = "Ты дружелюбный помощник. Дай прогноз погоды."
-        user = f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, ощущается как {payload['feels_like']}°C. Сегодня от {payload['temp_min']}°C до {payload['temp_max']}°C, осадки {payload['precip']} мм."
-
+    """Получение описания от Groq"""
     try:
+        if text_type == "morning":
+            system = "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды."
+            user = f"В {payload['location_short']} сегодня {payload['temp_min']}-{payload['temp_max']}°C, {payload['weather_desc']}, осадки {payload['precip']} мм."
+        elif text_type == "evening":
+            system = "Ты нежный и заботливый. Напиши вечернее пожелание."
+            user = f"Сегодня было {payload['temp_now']}°C, {payload['weather_desc']}. Завтра {payload['temp_min']}-{payload['temp_max']}°C."
+        else:
+            system = "Ты дружелюбный помощник. Дай прогноз погоды."
+            user = f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, ощущается как {payload['feels_like']}°C. Днем {payload['temp_min']}-{payload['temp_max']}°C, осадки {payload['precip']} мм."
+
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             temperature=0.7,
-            max_tokens=250,
+            max_tokens=200,
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"Ошибка Groq API: {e}")
+        logger.error(f"Ошибка Groq: {e}")
         return None
 
-# ================== ФУНКЦИИ РАССЫЛКИ ==================
+# ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
+def parse_time(text: str) -> datetime | None:
+    """Парсинг времени из текста"""
+    now = datetime.now()
+    text = text.lower().strip()
+    
+    # Сегодня в 15:30
+    if 'сегодня' in text:
+        match = re.search(r'(\d{1,2}):(\d{2})', text)
+        if match:
+            return now.replace(hour=int(match.group(1)), minute=int(match.group(2)), second=0)
+    
+    # Завтра в 9
+    if 'завтра' in text:
+        match = re.search(r'(\d{1,2})', text)
+        if match:
+            return (now + timedelta(days=1)).replace(hour=int(match.group(1)), minute=0, second=0)
+    
+    # Через N часов
+    match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
+    if match:
+        return now + timedelta(hours=int(match.group(1)))
+    
+    # Через N минут
+    match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
+    if match:
+        return now + timedelta(minutes=int(match.group(1)))
+    
+    # Просто время 15:30
+    match = re.search(r'^(\d{1,2}):(\d{2})$', text)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        candidate = now.replace(hour=hour, minute=minute, second=0)
+        return candidate if candidate > now else candidate + timedelta(days=1)
+    
+    return None
+
+async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
+    """Отправка напоминания"""
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"⏰ *НАПОМИНАНИЕ!*\n\n{text}",
+            parse_mode='Markdown'
+        )
+        logger.info(f"✅ Напоминание {reminder_id} отправлено")
+        if user_id in user_reminders:
+            user_reminders[user_id] = [r for r in user_reminders[user_id] if r['id'] != reminder_id]
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {e}")
+
+# ================== РАССЫЛКИ ==================
 async def send_morning_forecast(bot):
     """Утренняя рассылка в 8:00"""
-    logger.info("⏰ Утренняя рассылка")
     if not user_cities:
         return
-    
     for user_id, city in user_cities.items():
         try:
             geo = geocode_city(city)
             if not geo:
                 continue
-                
             wx = fetch_today_weather(geo["latitude"], geo["longitude"])
             payload = build_weather_payload(geo.get("name", city), geo, wx)
-            
-            text = await get_groq_weather(payload, "morning")
-            if not text:
-                text = format_morning_text(payload)
-            
+            text = await get_groq_weather(payload, "morning") or format_morning_text(payload)
             await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -287,38 +298,33 @@ async def send_morning_forecast(bot):
 
 async def send_evening_message(bot):
     """Вечерняя рассылка в 22:00"""
-    logger.info("🌙 Вечерняя рассылка")
     if not user_cities:
         return
-    
     for user_id, city in user_cities.items():
         try:
             geo = geocode_city(city)
             if not geo:
                 continue
-                
             wx = fetch_today_weather(geo["latitude"], geo["longitude"])
             payload = build_weather_payload(geo.get("name", city), geo, wx)
-            
-            text = await get_groq_weather(payload, "evening")
-            if not text:
-                text = format_evening_text(payload)
-            
+            text = await get_groq_weather(payload, "evening") or format_evening_text(payload)
             await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"Ошибка: {e}")
 
-# ================== ОБРАБОТЧИКИ КОМАНД ==================
+# ================== ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка /start"""
     user = update.effective_user
     logger.info(f"👉 /start от @{user.username}")
-    
     await update.message.reply_text(
         f"👋 *Привет, {user.first_name}!*\n\n"
-        f"Я бот погоды. Напиши название города или используй кнопки.",
-        reply_markup=keyboard,
+        f"Я бот-помощник. Умею:\n"
+        f"• Показывать погоду 🌤️\n"
+        f"• Создавать напоминания ⏰\n"
+        f"• Присылать прогноз в 8:00 и 22:00",
+        reply_markup=main_keyboard,
         parse_mode='Markdown'
     )
 
@@ -330,37 +336,144 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"📨 Сообщение от @{user.username}: '{text}'")
     
-    # ===== ОБРАБОТКА КНОПОК =====
+    # ===== ГЛАВНОЕ МЕНЮ =====
     if text == BTN_START:
-        logger.info("🔴 Кнопка Старт")
-        await update.message.reply_text("Введите название города:", reply_markup=keyboard)
+        if user_id in user_cities:
+            del user_cities[user_id]
+        await update.message.reply_text("Введите название города:", reply_markup=main_keyboard)
         return
     
-    elif text == BTN_UPDATE:
-        logger.info("🟢 Кнопка Обновить")
+    if text == BTN_UPDATE:
         if user_id not in user_cities:
-            await update.message.reply_text("Сначала введите город!", reply_markup=keyboard)
+            await update.message.reply_text("Сначала введите город!", reply_markup=main_keyboard)
+            return
+        await update.message.reply_text(f"Обновляю прогноз...", reply_markup=main_keyboard)
+        await send_weather(update, user_cities[user_id])
+        return
+    
+    if text == BTN_REMINDERS:
+        menu = ReplyKeyboardMarkup(
+            [["📝 Создать", "📋 Список"], ["❌ Удалить", "🔙 Назад"]],
+            resize_keyboard=True
+        )
+        await update.message.reply_text("📌 *Напоминания*\n\nВыберите действие:", 
+                                      parse_mode='Markdown', reply_markup=menu)
+        return
+    
+    # ===== МЕНЮ НАПОМИНАНИЙ =====
+    if text == "🔙 Назад":
+        await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
+        return
+    
+    if text == "📝 Создать":
+        await update.message.reply_text(
+            "🕐 *Создание напоминания*\n\n"
+            "Формат: `Текст | время`\n\n"
+            "Примеры:\n"
+            "• `Позвонить маме | 15:30`\n"
+            "• `Выпить таблетки | завтра в 9`\n"
+            "• `Сходить в магазин | через 2 часа`",
+            parse_mode='Markdown'
+        )
+        context.user_data['awaiting_reminder'] = True
+        return
+    
+    if text == "📋 Список":
+        if user_id not in user_reminders or not user_reminders[user_id]:
+            await update.message.reply_text("📋 У вас нет напоминаний.", reply_markup=main_keyboard)
+            return
+        response = "📋 *Ваши напоминания:*\n\n"
+        for i, rem in enumerate(user_reminders[user_id], 1):
+            t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
+            response += f"{i}. 🕐 *{t}*\n   {rem['text']}\n\n"
+        await update.message.reply_text(response, parse_mode='Markdown', reply_markup=main_keyboard)
+        return
+    
+    if text == "❌ Удалить":
+        if user_id not in user_reminders or not user_reminders[user_id]:
+            await update.message.reply_text("Нет напоминаний.", reply_markup=main_keyboard)
+            return
+        kb = []
+        for rem in user_reminders[user_id]:
+            t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
+            kb.append([f"❌ {t} - {rem['text'][:15]}"])
+        kb.append(["🔙 Назад"])
+        await update.message.reply_text("Выберите для удаления:", 
+                                      reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+        context.user_data['deleting_reminder'] = True
+        return
+    
+    # ===== СОЗДАНИЕ НАПОМИНАНИЯ =====
+    if context.user_data.get('awaiting_reminder'):
+        parts = text.split('|')
+        if len(parts) != 2:
+            await update.message.reply_text("❌ Формат: `Текст | время`", parse_mode='Markdown')
             return
         
-        city = user_cities[user_id]
-        await update.message.reply_text(f"Обновляю прогноз для {city}...", reply_markup=keyboard)
-        await send_weather(update, city)
-        return
-    
-    elif text == BTN_REMINDERS:
-        logger.info("🔵 Кнопка Напоминания")
+        reminder_text = parts[0].strip()
+        time_text = parts[1].strip()
+        reminder_time = parse_time(time_text)
+        
+        if not reminder_time:
+            await update.message.reply_text("❌ Не понял время. Попробуйте: 15:30, завтра в 9, через 2 часа")
+            return
+        
+        global reminder_counter
+        reminder_counter += 1
+        
+        job = context.application.scheduler.add_job(
+            send_reminder,
+            'date',
+            run_date=reminder_time,
+            args=[context.application.bot, user_id, reminder_text, reminder_counter]
+        )
+        
+        if user_id not in user_reminders:
+            user_reminders[user_id] = []
+        
+        user_reminders[user_id].append({
+            'id': reminder_counter,
+            'text': reminder_text,
+            'time': reminder_time.isoformat(),
+            'job_id': job.id
+        })
+        
+        context.user_data['awaiting_reminder'] = False
         await update.message.reply_text(
-            "📌 *Напоминания*\n\n"
-            "Эта функция пока в разработке. Скоро тут можно будет создавать напоминания!",
+            f"✅ *Напоминание создано!*\n\n📝 {reminder_text}\n🕐 {reminder_time.strftime('%d.%m.%Y %H:%M')}",
             parse_mode='Markdown',
-            reply_markup=keyboard
+            reply_markup=main_keyboard
         )
         return
     
-    # ===== ОБРАБОТКА ВВОДА ГОРОДА =====
-    logger.info(f"🏙️ Ввод города: {text}")
+    # ===== УДАЛЕНИЕ НАПОМИНАНИЯ =====
+    if context.user_data.get('deleting_reminder'):
+        if text == "🔙 Назад":
+            context.user_data['deleting_reminder'] = False
+            await update.message.reply_text("Главное меню:", reply_markup=main_keyboard)
+            return
+        
+        if user_id in user_reminders:
+            for rem in user_reminders[user_id]:
+                preview = f"❌ {datetime.fromisoformat(rem['time']).strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
+                if preview == text:
+                    try:
+                        context.application.scheduler.remove_job(rem['job_id'])
+                    except:
+                        pass
+                    user_reminders[user_id].remove(rem)
+                    await update.message.reply_text("✅ Удалено!", reply_markup=main_keyboard)
+                    context.user_data['deleting_reminder'] = False
+                    return
+        
+        await update.message.reply_text("❌ Не найдено", reply_markup=main_keyboard)
+        context.user_data['deleting_reminder'] = False
+        return
+    
+    # ===== ВВОД ГОРОДА =====
+    logger.info(f"🏙️ Город: {text}")
     user_cities[user_id] = text
-    await update.message.reply_text(f"Ищу погоду для {text}...", reply_markup=keyboard)
+    await update.message.reply_text(f"🔍 Ищу погоду для {text}...", reply_markup=main_keyboard)
     await send_weather(update, text)
 
 async def send_weather(update: Update, city: str):
@@ -368,54 +481,38 @@ async def send_weather(update: Update, city: str):
     try:
         geo = geocode_city(city)
         if not geo:
-            await update.message.reply_text(
-                f"❌ Город '{city}' не найден.",
-                reply_markup=keyboard
-            )
+            await update.message.reply_text(f"❌ Город '{city}' не найден.", reply_markup=main_keyboard)
             return
         
         wx = fetch_today_weather(geo["latitude"], geo["longitude"])
         payload = build_weather_payload(geo.get("name", city), geo, wx)
+        text = await get_groq_weather(payload) or format_weather_text(payload)
         
-        groq_text = await get_groq_weather(payload, "normal")
-        
-        if groq_text:
-            final_text = groq_text
-        else:
-            final_text = format_weather_text(payload)
-        
-        await update.message.reply_text(final_text, reply_markup=keyboard, parse_mode='Markdown')
+        await update.message.reply_text(text, reply_markup=main_keyboard, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        await update.message.reply_text("❌ Ошибка. Попробуйте позже.", reply_markup=keyboard)
+        await update.message.reply_text("❌ Ошибка. Попробуйте позже.", reply_markup=main_keyboard)
 
 # ================== ЗАПУСК ==================
 async def main():
-    """Главная функция"""
     logger.info("🚀 Запуск бота...")
     
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("✅ Обработчики зарегистрированы")
-    
-    # Запускаем бота
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     
-    logger.info("✅ Бот запущен")
-    
-    # Планировщик для рассылок
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0), args=[app.bot])
     scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0), args=[app.bot])
     scheduler.start()
-    logger.info("⏰ Планировщик запущен")
+    
+    logger.info("✅ Бот запущен! Планировщик работает.")
     
     try:
         while True:
