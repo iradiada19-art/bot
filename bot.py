@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ИСПРАВЛЕНО СОХРАНЕНИЕ НЕСКОЛЬКИХ НАПОМИНАНИЙ
+# bot.py - ПОЛНАЯ ВЕРСИЯ С GROQ И МОСКОВСКИМ ВРЕМЕНЕМ
 
 import json
 import os
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # ================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"  # Замени на новый ключ
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
@@ -124,8 +124,7 @@ def save_reminders():
         with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
         
-        total = sum(len(v) for v in user_reminders.values())
-        logger.info(f"💾 Напоминания сохранены. Всего: {total}")
+        logger.info(f"💾 Напоминания сохранены. Всего: {sum(len(v) for v in user_reminders.values())}")
         return True
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения: {e}")
@@ -148,11 +147,9 @@ def load_reminders():
                         max_id = rem['id']
             reminder_counter = max_id
             
-            total = sum(len(v) for v in user_reminders.values())
-            logger.info(f"✅ Загружено напоминаний: {total}, макс ID: {reminder_counter}")
+            logger.info(f"✅ Загружено напоминаний: {sum(len(v) for v in user_reminders.values())}")
         else:
             user_reminders = {}
-            logger.info("📂 Файл напоминаний не найден, создаем новый")
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки: {e}")
         user_reminders = {}
@@ -273,6 +270,7 @@ def format_evening_text(payload: dict) -> str:
 
 async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
     """Получение текста погоды (с Groq если доступен)"""
+    # Пробуем получить через Groq
     if groq_client:
         try:
             if text_type == "morning":
@@ -298,6 +296,7 @@ async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
         except Exception as e:
             logger.error(f"❌ Ошибка Groq: {e}")
     
+    # Запасной вариант (локальное форматирование)
     logger.info(f"📝 Используем локальное форматирование для {text_type}")
     if text_type == "morning":
         return format_morning_text(payload)
@@ -376,7 +375,6 @@ async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
         )
         logger.info(f"✅ Напоминание {reminder_id} отправлено")
         
-        # Удаляем из словаря после отправки
         if user_id in user_reminders:
             user_reminders[user_id] = [r for r in user_reminders[user_id] if r['id'] != reminder_id]
             save_reminders()
@@ -608,7 +606,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             if user_id in user_reminders:
-                for rem in user_reminders[user_id][:]:  # [:] для безопасного удаления
+                for rem in user_reminders[user_id][:]:
                     rem_time = datetime.fromisoformat(rem['time'])
                     if rem_time.tzinfo is None:
                         rem_time = MSK_TZ.localize(rem_time)
@@ -680,13 +678,9 @@ async def main():
     scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0, timezone=MSK_TZ), args=[app.bot])
     scheduler.start()
     
-    # Восстанавливаем напоминания в планировщике
+    # Восстанавливаем напоминания
     restored = 0
-    expired = 0
-    
-    for user_id, reminders in list(user_reminders.items()):  # list() для безопасного удаления
-        valid_reminders = []
-        
+    for user_id, reminders in user_reminders.items():
         for rem in reminders:
             try:
                 reminder_time = datetime.fromisoformat(rem['time'])
@@ -694,7 +688,6 @@ async def main():
                     reminder_time = MSK_TZ.localize(reminder_time)
                 
                 if reminder_time > datetime.now(MSK_TZ):
-                    # Активное напоминание
                     job = scheduler.add_job(
                         send_reminder,
                         'date',
@@ -703,20 +696,13 @@ async def main():
                         id=rem['job_id']
                     )
                     rem['job_id'] = job.id
-                    valid_reminders.append(rem)
                     restored += 1
-                    logger.info(f"🔄 Восстановлено напоминание {rem['id']} для user {user_id}")
                 else:
-                    # Просроченное напоминание
-                    expired += 1
-                    logger.info(f"⌛ Удалено просроченное напоминание {rem['id']} для user {user_id}")
+                    user_reminders[user_id].remove(rem)
             except Exception as e:
                 logger.error(f"❌ Ошибка восстановления: {e}")
-                valid_reminders.append(rem)  # Сохраняем на всякий случай
-        
-        user_reminders[user_id] = valid_reminders
     
-    logger.info(f"🔄 Восстановлено напоминаний: {restored}, удалено просроченных: {expired}")
+    logger.info(f"🔄 Восстановлено напоминаний: {restored}")
     save_reminders()
     logger.info("✅ Бот запущен! Планировщик работает.")
     
