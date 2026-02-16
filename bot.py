@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ИСПРАВЛЕННАЯ ВЕРСИЯ С ТВОИМИ ФОРМУЛИРОВКАМИ
+# bot.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 
 import json
 import os
@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from groq import Groq
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -40,7 +41,7 @@ if not TELEGRAM_BOT_TOKEN:
 logger.info("✅ Токены успешно загружены")
 
 # ================== ФАЙЛ ДЛЯ СОХРАНЕНИЯ ==================
-REMINDERS_FILE = "/tmp/reminders.json"  # Для Bothost
+REMINDERS_FILE = "/tmp/reminders.json"
 logger.info(f"📁 Файл напоминаний: {REMINDERS_FILE}")
 
 # ================== КОНСТАНТЫ ==================
@@ -60,8 +61,13 @@ reminders_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Инициализация Groq клиента
-groq_client = Groq(api_key=GROQ_API_KEY)
+# Инициализация Groq клиента (может не работать)
+try:
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    logger.info("✅ Groq клиент инициализирован")
+except Exception as e:
+    logger.error(f"❌ Ошибка инициализации Groq: {e}")
+    groq_client = None
 
 # Хранилища данных
 user_cities = {}  # {user_id: city_name}
@@ -70,6 +76,9 @@ reminder_counter = 0
 
 # Состояния пользователей
 user_state = {}  # {user_id: "main" или "reminders"}
+
+# Планировщик (будет инициализирован в main)
+scheduler = None
 
 # Словарь кодов погоды на русском
 WEATHER_CODE_RU = {
@@ -201,7 +210,7 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     }
 
 def format_weather_text(payload: dict) -> str:
-    """Форматирование текста погоды"""
+    """Форматирование текста погоды (без Groq)"""
     feels = payload['feels_like']
     feels_text = f" (ощущается как {feels}°C)" if feels else ""
     
@@ -254,29 +263,14 @@ def format_evening_text(payload: dict) -> str:
         f"{random.choice(sweet)}"
     )
 
-async def get_groq_weather(payload: dict, text_type: str = "normal") -> str | None:
-    """Получение описания от Groq"""
-    try:
-        if text_type == "morning":
-            system = "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды."
-            user = f"В {payload['location_short']} сегодня {payload['temp_min']}-{payload['temp_max']}°C, {payload['weather_desc']}, осадки {payload['precip']} мм."
-        elif text_type == "evening":
-            system = "Ты нежный и заботливый. Напиши вечернее пожелание."
-            user = f"Сегодня было {payload['temp_now']}°C, {payload['weather_desc']}. Завтра {payload['temp_min']}-{payload['temp_max']}°C."
-        else:
-            system = "Ты дружелюбный помощник. Дай прогноз погоды."
-            user = f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, ощущается как {payload['feels_like']}°C. Днем {payload['temp_min']}-{payload['temp_max']}°C, осадки {payload['precip']} мм."
-
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.7,
-            max_tokens=200,
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Ошибка Groq: {e}")
-        return None
+async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
+    """Получение текста погоды (без Groq из-за ошибки 403)"""
+    if text_type == "morning":
+        return format_morning_text(payload)
+    elif text_type == "evening":
+        return format_evening_text(payload)
+    else:
+        return format_weather_text(payload)
 
 # ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
 def parse_time(text: str) -> datetime | None:
@@ -352,7 +346,7 @@ async def send_morning_forecast(bot):
                 continue
             wx = fetch_today_weather(geo["latitude"], geo["longitude"])
             payload = build_weather_payload(geo.get("name", city), geo, wx)
-            text = await get_groq_weather(payload, "morning") or format_morning_text(payload)
+            text = await get_weather_text(payload, "morning")
             await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -369,7 +363,7 @@ async def send_evening_message(bot):
                 continue
             wx = fetch_today_weather(geo["latitude"], geo["longitude"])
             payload = build_weather_payload(geo.get("name", city), geo, wx)
-            text = await get_groq_weather(payload, "evening") or format_evening_text(payload)
+            text = await get_weather_text(payload, "evening")
             await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -510,31 +504,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             global reminder_counter
             reminder_counter += 1
             
-            job = context.application.scheduler.add_job(
-                send_reminder,
-                'date',
-                run_date=reminder_time,
-                args=[context.application.bot, user_id, reminder_text, reminder_counter]
-            )
-            
-            if user_id not in user_reminders:
-                user_reminders[user_id] = []
-            
-            user_reminders[user_id].append({
-                'id': reminder_counter,
-                'text': reminder_text,
-                'time': reminder_time.isoformat(),
-                'job_id': job.id
-            })
-            
-            save_reminders()
-            
-            context.user_data['awaiting_reminder'] = False
-            await update.message.reply_text(
-                f"✅ *Напоминание создано!*\n\n📝 {reminder_text}\n🕐 {reminder_time.strftime('%d.%m.%Y %H:%M')}",
-                parse_mode='Markdown',
-                reply_markup=reminders_keyboard
-            )
+            # Используем глобальный планировщик
+            global scheduler
+            if scheduler:
+                job = scheduler.add_job(
+                    send_reminder,
+                    'date',
+                    run_date=reminder_time,
+                    args=[context.application.bot, user_id, reminder_text, reminder_counter]
+                )
+                
+                if user_id not in user_reminders:
+                    user_reminders[user_id] = []
+                
+                user_reminders[user_id].append({
+                    'id': reminder_counter,
+                    'text': reminder_text,
+                    'time': reminder_time.isoformat(),
+                    'job_id': job.id
+                })
+                
+                save_reminders()
+                
+                context.user_data['awaiting_reminder'] = False
+                await update.message.reply_text(
+                    f"✅ *Напоминание создано!*\n\n📝 {reminder_text}\n🕐 {reminder_time.strftime('%d.%m.%Y %H:%M')}",
+                    parse_mode='Markdown',
+                    reply_markup=reminders_keyboard
+                )
+            else:
+                await update.message.reply_text("❌ Ошибка планировщика. Попробуй позже.")
             return
         
         # ===== УДАЛЕНИЕ НАПОМИНАНИЯ =====
@@ -549,7 +548,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     preview = f"❌ {datetime.fromisoformat(rem['time']).strftime('%d.%m %H:%M')} - {rem['text'][:15]}"
                     if preview == text:
                         try:
-                            context.application.scheduler.remove_job(rem['job_id'])
+                            if scheduler:
+                                scheduler.remove_job(rem['job_id'])
                         except:
                             pass
                         user_reminders[user_id].remove(rem)
@@ -583,7 +583,7 @@ async def send_weather(update: Update, city: str):
         
         wx = fetch_today_weather(geo["latitude"], geo["longitude"])
         payload = build_weather_payload(geo.get("name", city), geo, wx)
-        text = await get_groq_weather(payload) or format_weather_text(payload)
+        text = await get_weather_text(payload, "normal")
         
         await update.message.reply_text(text, reply_markup=main_keyboard, parse_mode='Markdown')
         
@@ -593,6 +593,7 @@ async def send_weather(update: Update, city: str):
 
 # ================== ЗАПУСК ==================
 async def main():
+    global scheduler
     logger.info("🚀 Запуск бота...")
     
     # Загружаем сохраненные напоминания
@@ -607,6 +608,7 @@ async def main():
     await app.start()
     await app.updater.start_polling()
     
+    # Создаем планировщик
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0), args=[app.bot])
     scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0), args=[app.bot])
