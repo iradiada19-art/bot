@@ -50,7 +50,7 @@ REMINDERS_FILE = "/tmp/reminders.json"
 logger.info(f"📁 Файл напоминаний: {REMINDERS_FILE}")
 
 # ================== КОНСТАНТЫ ==================
-BTN_START = "Старт"
+BTN_START = "Новый город"
 BTN_UPDATE = "Обновить прогноз"
 BTN_REMINDERS = "Мои напоминания"
 
