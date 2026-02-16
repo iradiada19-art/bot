@@ -396,8 +396,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Я бот-помощник. Умею:\n"
         f"• Показывать погоду 🌤️\n"
         f"• Создавать напоминания ⏰\n"
-        f"• Присылать прогноз в 8:00 и 22:00"\n"
-        f"• И желать доброго утра,
+        f"• Присылать прогноз в 8:00 и 22:00\n"
+        f"• И желать доброго утра",
         reply_markup=main_keyboard,
         parse_mode='Markdown'
     )
