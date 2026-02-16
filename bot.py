@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ИСПРАВЛЕННЫЙ ПОРЯДОК ПРОВЕРОК
+# bot.py - ИСПРАВЛЕННАЯ ВЕРСИЯ С ТВОИМИ ФОРМУЛИРОВКАМИ
 
 import json
 import os
@@ -36,10 +36,6 @@ GROQ_API_KEY = "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"
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
     raise RuntimeError("TELEGRAM_BOT_TOKEN обязательно должен быть задан")
-
-if not GROQ_API_KEY:
-    logger.error("❌ GROQ_API_KEY не найден!")
-    raise RuntimeError("GROQ_API_KEY обязательно должен быть задан")
 
 logger.info("✅ Токены успешно загружены")
 
@@ -397,7 +393,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Показывать погоду 🌤️\n"
         f"• Создавать напоминания ⏰\n"
         f"• Присылать прогноз в 8:00 и 22:00\n"
-        f"• И желать доброго утра",
+        f"• И желать доброго утра и спокойной ночи! 🌙",
         reply_markup=main_keyboard,
         parse_mode='Markdown'
     )
@@ -469,7 +465,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("📋 У тебя нет напоминаний.", reply_markup=reminders_keyboard)
                 return
             
-            response = "📋 *Ваши напоминания:*\n\n"
+            response = "📋 *Твои напоминания:*\n\n"
             for i, rem in enumerate(user_reminders[user_id], 1):
                 t = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
                 response += f"{i}. 🕐 *{t}*\n   {rem['text']}\n\n"
@@ -488,7 +484,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kb.append([f"❌ {t} - {rem['text'][:15]}"])
             kb.append(["🔙 Назад"])
             await update.message.reply_text(
-                "Выберите для удаления:", 
+                "Выбери для удаления:", 
                 reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
             )
             context.user_data['deleting_reminder'] = True
@@ -508,7 +504,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reminder_time = parse_time(time_text)
             
             if not reminder_time:
-                await update.message.reply_text("❌ Не понял время. Попробуйте: 15:30, завтра в 9, через 2 часа, через час")
+                await update.message.reply_text("❌ Не понял время. Попробуй: 15:30, завтра в 9, через 2 часа, через час")
                 return
             
             global reminder_counter
@@ -593,7 +589,7 @@ async def send_weather(update: Update, city: str):
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
-        await update.message.reply_text("❌ Ошибка. Попробуйте позже.", reply_markup=main_keyboard)
+        await update.message.reply_text("❌ Ошибка. Попробуй позже.", reply_markup=main_keyboard)
 
 # ================== ЗАПУСК ==================
 async def main():
