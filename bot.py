@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ИСПРАВЛЕННАЯ ВЕРСИЯ (с правильной обработкой кнопок)
+# bot.py - УПРОЩЕННАЯ ВЕРСИЯ С ИСПРАВЛЕННЫМИ КНОПКАМИ
 
 import os
 import asyncio
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ================== ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ==================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.getenv("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")
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
@@ -213,12 +213,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return ASK_CITY
 
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка нажатий на кнопки"""
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка нажатий на кнопки (ВЫНЕСЕН ОТДЕЛЬНО)"""
     text = update.message.text.strip()
     user = update.effective_user
-    logger.info(f"Пользователь @{user.username} нажал кнопку: '{text}'")
-
+    logger.info(f"🔥 НАЖАТА КНОПКА: '{text}' от @{user.username}")
+    
     if text == BTN_START:
         # Кнопка "Старт" - начинаем заново
         context.user_data.pop("city", None)
@@ -241,40 +241,23 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         await update.message.reply_text(f"Обновляю прогноз для города {city}...", reply_markup=keyboard)
         await send_weather(update, context, city)
-        return ConversationHandler.END
+        return ASK_CITY  # Возвращаемся в состояние ожидания города
     
-    # Если это не кнопка, а что-то другое
-    return await handle_message(update, context)
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка текстовых сообщений (ввод города)"""
-    text = update.message.text.strip()
-    user = update.effective_user
-    
-    logger.info(f"Пользователь @{user.username} отправил сообщение: '{text}'")
-    
-    # Проверяем, не является ли сообщение командой или кнопкой
-    if text in [BTN_START, BTN_UPDATE]:
-        return await handle_buttons(update, context)
-    
-    if text.startswith('/'):
-        await update.message.reply_text(
-            "Используйте кнопки или введите название города.",
-            reply_markup=keyboard
-        )
-        return ASK_CITY
-    
-    # Сохраняем город
-    context.user_data["city"] = text
-    logger.info(f"Сохраняем город '{text}' для пользователя @{user.username}")
-    
-    await update.message.reply_text(f"Ищу погоду для города {text}...", reply_markup=keyboard)
-    await send_weather(update, context, text)
     return ConversationHandler.END
 
 async def city_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Функция для обработки ввода города в состоянии ASK_CITY"""
-    return await handle_message(update, context)
+    """Обработка ввода города"""
+    text = update.message.text.strip()
+    user = update.effective_user
+    
+    logger.info(f"🏙️ ВВОД ГОРОДА: '{text}' от @{user.username}")
+    
+    # Сохраняем город
+    context.user_data["city"] = text
+    
+    await update.message.reply_text(f"Ищу погоду для города {text}...", reply_markup=keyboard)
+    await send_weather(update, context, text)
+    return ASK_CITY  # Остаемся в состоянии ожидания города
 
 async def send_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city: str) -> None:
     """Отправка прогноза погоды пользователю"""
@@ -305,7 +288,7 @@ async def send_weather(update: Update, context: ContextTypes.DEFAULT_TYPE, city:
         logger.info(f"Формируем описание погоды через Groq для города {city_full}")
         text = groq_format_weather(payload)
 
-        logger.info(f"Отправлен прогноз для {city_full} пользователю @{user.username}")
+        logger.info(f"✅ Отправлен прогноз для {city_full} пользователю @{user.username}")
         await update.message.reply_text(text, reply_markup=keyboard)
 
     except requests.exceptions.RequestException as e:
@@ -329,7 +312,7 @@ async def main():
     # Создаем приложение
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Создаем обработчик диалога
+    # СОЗДАЕМ ОБРАБОТЧИК ДИАЛОГА - УПРОЩЕННАЯ ВЕРСИЯ
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_cmd)],
         states={
@@ -338,22 +321,23 @@ async def main():
             ],
         },
         fallbacks=[
-            MessageHandler(filters.Regex(f"^({BTN_START}|{BTN_UPDATE})$"), handle_buttons),
+            CommandHandler("start", start_cmd),
         ],
         name="weather_conversation",
         persistent=False,
     )
 
-    # Добавляем обработчики
+    # Добавляем обработчики в правильном порядке
     app.add_handler(conv_handler)
     
-    # Добавляем обработчик для кнопок вне диалога
+    # Обработчик для кнопок - с более широким фильтром
     app.add_handler(MessageHandler(
-        filters.Regex(f"^({BTN_START}|{BTN_UPDATE})$"), 
-        handle_buttons
+        filters.Text([BTN_START, BTN_UPDATE]), 
+        button_handler
     ))
 
     logger.info("✅ Обработчики зарегистрированы")
+    logger.info(f"📋 Кнопки: '{BTN_START}' и '{BTN_UPDATE}'")
 
     # Запускаем бота
     await app.initialize()
