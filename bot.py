@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - МАКСИМАЛЬНО ПРОСТАЯ ВЕРСИЯ
+# bot.py - ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ С КРАСИВЫМ ФОРМАТИРОВАНИЕМ
 
 import os
 import asyncio
@@ -51,25 +51,40 @@ keyboard = ReplyKeyboardMarkup(
 # Инициализация Groq клиента
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Словарь для хранения городов пользователей (проще чем context.user_data)
+# Словарь для хранения городов пользователей
 user_cities = {}
 
+# Словарь кодов погоды на русском
 WEATHER_CODE_RU = {
-    0: "ясно", 1: "в основном ясно", 2: "переменная облачность", 3: "пасмурно",
-    45: "туман", 48: "изморозь/туман",
-    51: "морось слабая", 53: "морось умеренная", 55: "морось сильная",
-    56: "ледяная морось слабая", 57: "ледяная морось сильная",
-    61: "дождь слабый", 63: "дождь умеренный", 65: "дождь сильный",
-    66: "ледяной дождь слабый", 67: "ледяной дождь сильный",
-    71: "снег слабый", 73: "снег умеренный", 75: "снег сильный",
-    77: "снежные зерна",
-    80: "ливень слабый", 81: "ливень умеренный", 82: "ливень сильный",
-    85: "снегопад слабый", 86: "снегопад сильный",
-    95: "гроза", 96: "гроза с градом (слабым)", 99: "гроза с градом (сильным)",
+    0: "☀️ ясно",
+    1: "🌤 в основном ясно",
+    2: "⛅ переменная облачность",
+    3: "☁️ пасмурно",
+    45: "🌫 туман",
+    48: "🌫 изморозь",
+    51: "🌧 морось",
+    53: "🌧 морось",
+    55: "🌧 сильная морось",
+    61: "🌧 небольшой дождь",
+    63: "🌧 дождь",
+    65: "🌧 сильный дождь",
+    71: "🌨 небольшой снег",
+    73: "🌨 снег",
+    75: "🌨 сильный снег",
+    77: "🌨 снежная крупа",
+    80: "🌧 ливень",
+    81: "🌧 ливень",
+    82: "🌧 сильный ливень",
+    85: "🌨 снегопад",
+    86: "🌨 сильный снегопад",
+    95: "⛈ гроза",
+    96: "⛈ гроза с градом",
+    99: "⛈ сильная гроза",
 }
 
 # ================== ФУНКЦИИ ПОГОДЫ ==================
 def geocode_city(city: str) -> dict | None:
+    """Получение координат города"""
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": city, "count": 1, "language": "ru", "format": "json"}
     try:
@@ -83,47 +98,120 @@ def geocode_city(city: str) -> dict | None:
         return None
 
 def fetch_today_weather(lat: float, lon: float) -> dict:
+    """Получение погоды"""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,weather_code",
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,weather_code,apparent_temperature",
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
-        "timezone": "auto", "forecast_days": 1,
+        "timezone": "auto",
+        "forecast_days": 1,
     }
     r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
     return r.json()
 
 def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
+    """Формирование данных о погоде"""
     current = wx.get("current", {}) or {}
     daily = wx.get("daily", {}) or {}
     
+    # Определяем регион и страну
+    region_parts = []
+    if geo.get('admin1'):
+        region_parts.append(geo['admin1'])
+    if geo.get('country'):
+        region_parts.append(geo['country'])
+    
+    location_full = city_label
+    if region_parts:
+        location_full = f"{city_label}, {', '.join(region_parts)}"
+    
+    # Получаем описание погоды с эмодзи
+    weather_code = current.get("weather_code")
+    weather_desc = WEATHER_CODE_RU.get(weather_code, "🌈 неизвестно")
+    
     return {
-        "location": f"{city_label}, {geo.get('country', '')}",
-        "temp_now_c": current.get("temperature_2m"),
-        "temp_min_c": (daily.get("temperature_2m_min") or [None])[0],
-        "temp_max_c": (daily.get("temperature_2m_max") or [None])[0],
-        "weather_desc_ru": WEATHER_CODE_RU.get(current.get("weather_code"), "неизвестно"),
+        "location": location_full,
+        "location_short": city_label,
+        "temp_now": current.get("temperature_2m"),
+        "feels_like": current.get("apparent_temperature"),
+        "temp_min": (daily.get("temperature_2m_min") or [None])[0],
+        "temp_max": (daily.get("temperature_2m_max") or [None])[0],
+        "precip": (daily.get("precipitation_sum") or [0])[0],
+        "weather_desc": weather_desc,
+        "weather_code": weather_code,
     }
 
-def groq_format_weather(payload: dict) -> str:
-    system = "Ты русскоязычный ассистент. Опиши погоду на сегодня одним предложением."
-    user = f"В городе {payload['location']} сейчас {payload['temp_now_c']}°C, {payload['weather_desc_ru']}. Минимум {payload['temp_min_c']}°C, максимум {payload['temp_max_c']}°C."
+def format_weather_text(payload: dict) -> str:
+    """Форматирование текста погоды (запасной вариант)"""
+    feels = payload['feels_like']
+    feels_text = f" (ощущается как {feels}°C)" if feels else ""
     
+    # Определяем рекомендации по одежде
+    temp = payload['temp_now']
+    if temp < -20:
+        advice = "🥶 Очень холодно! Одевайтесь максимально тепло."
+    elif temp < -10:
+        advice = "🧥 Холодно. Не забудьте шапку и перчатки."
+    elif temp < 0:
+        advice = "🧥 Прохладно. Лучше надеть куртку."
+    elif temp < 10:
+        advice = "🧥 Свежо. Легкая куртка не помешает."
+    elif temp < 20:
+        advice = "👕 Комфортная температура. Можно гулять!"
+    else:
+        advice = "👕 Тепло. Легкая одежда подойдет."
+    
+    # Формируем красивый ответ с эмодзи и переносами строк
+    text = (
+        f"📍 *{payload['location_short']}*\n\n"
+        f"🌡️ *Сейчас:* {payload['temp_now']}°C {payload['weather_desc']}{feels_text}\n\n"
+        f"📊 *Днем:* от {payload['temp_min']}°C до {payload['temp_max']}°C\n\n"
+        f"💧 *Осадки:* {payload['precip']} мм\n\n"
+        f"💡 *Совет:* {advice}"
+    )
+    return text
+
+async def get_groq_weather(payload: dict) -> str | None:
+    """Получение красивого описания от Groq"""
+    system = (
+        "Ты дружелюбный помощник, который дает прогноз погоды. "
+        "Твои ответы должны быть:\n"
+        "- Информативными (температура, осадки, ощущения)\n"
+        "- Разбитыми на абзацы (используй \\n\\n)\n"
+        "- С дружелюбным тоном\n"
+        "- Без markdown, только текст\n\n"
+        "ПРИМЕР:\n"
+        "В Москве сейчас −5°C и снежно. Ощущается как −10°C.\n\n"
+        "В течение дня: от −8°C до −2°C. Ожидается небольшой снег.\n\n"
+        "Одевайтесь теплее и будьте осторожны на дорогах!"
+    )
+
+    user = (
+        f"Данные о погоде для {payload['location_short']}:\n"
+        f"Сейчас: {payload['temp_now']}°C, ощущается как {payload['feels_like']}°C\n"
+        f"Состояние: {payload['weather_desc']}\n"
+        f"Сегодня: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
+        f"Осадки: {payload['precip']} мм\n"
+        f"Сформируй короткий прогноз из 3-4 предложений, разделенных пустыми строками."
+    )
+
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            temperature=0.2,
-            max_tokens=100,
+            temperature=0.7,
+            max_tokens=250,
         )
         return completion.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"Ошибка Groq: {e}")
-        return f"Сейчас в {payload['location']} {payload['temp_now_c']}°C, {payload['weather_desc_ru']}."
+        logger.error(f"Ошибка Groq API: {e}")
+        return None
 
 # ================== ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,8 +225,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_cities[user_id]
     
     await update.message.reply_text(
-        f"👋 Привет, {user.first_name}!\n\nВведите название города:",
-        reply_markup=keyboard
+        f"👋 *Привет, {user.first_name}!*\n\n"
+        f"Я помогу узнать погоду в любом городе.\n"
+        f"Просто напиши название города или используй кнопки ниже.",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,15 +243,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ОБРАБОТКА КНОПОК =====
     if text == BTN_START:
         logger.info(f"🔴 НАЖАТА КНОПКА: Старт")
-        # Очищаем город
         if user_id in user_cities:
             del user_cities[user_id]
-        await update.message.reply_text("Введите название города:", reply_markup=keyboard)
+        await update.message.reply_text(
+            "Введите название города:",
+            reply_markup=keyboard
+        )
         return
     
     elif text == BTN_UPDATE:
         logger.info(f"🟢 НАЖАТА КНОПКА: Обновить прогноз")
-        # Проверяем, есть ли сохраненный город
         if user_id not in user_cities:
             await update.message.reply_text(
                 "Сначала введите название города!",
@@ -170,22 +262,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         city = user_cities[user_id]
         logger.info(f"🔄 Обновляем прогноз для города: {city}")
-        await update.message.reply_text(f"Обновляю прогноз для {city}...", reply_markup=keyboard)
+        await update.message.reply_text(
+            f"🔄 Обновляю прогноз для *{city}*...",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
         await send_weather(update, city)
         return
     
     # ===== ОБРАБОТКА ВВОДА ГОРОДА =====
-    logger.info(f"🏙️ Похоже на название города: {text}")
+    logger.info(f"🏙️ Ввод города: {text}")
     
     # Сохраняем город
     user_cities[user_id] = text
-    logger.info(f"💾 Сохраняем город {text} для пользователя @{user.username}")
     
-    await update.message.reply_text(f"Ищу погоду для города {text}...", reply_markup=keyboard)
+    await update.message.reply_text(
+        f"🔍 Ищу погоду для *{text}*...",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
     await send_weather(update, text)
 
 async def send_weather(update: Update, city: str):
-    """Отправка прогноза с правильным форматированием"""
+    """Отправка прогноза"""
     user = update.effective_user
     
     try:
@@ -193,8 +292,9 @@ async def send_weather(update: Update, city: str):
         geo = geocode_city(city)
         if not geo:
             await update.message.reply_text(
-                f"❌ Город '{city}' не найден. Попробуйте еще раз:",
-                reply_markup=keyboard
+                f"❌ Город *'{city}'* не найден.\n\nПопробуйте написать по-другому (например, 'Москва' вместо 'Moscow').",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
             )
             return
         
@@ -204,58 +304,43 @@ async def send_weather(update: Update, city: str):
         # Формируем данные
         payload = build_weather_payload(geo.get("name", city), geo, wx)
         
-        # Пробуем получить красивый ответ от Groq
-        try:
-            text = groq_format_weather(payload)
-            logger.info(f"✅ Получен ответ от Groq: {len(text)} символов")
-        except Exception as e:
-            logger.error(f"❌ Ошибка Groq: {e}")
-            # Запасной вариант с форматированием
-            feels_like = payload.get('feels_like_c')
-            feels_text = f" (ощущается как {feels_like}°C)" if feels_like else ""
-            
-            text = (f"🌍 *{payload['location_short']}*\n\n"
-                    f"🌡️ *Сейчас:* {payload['temp_now_c']}°C, {payload['weather_desc_ru']}{feels_text}\n\n"
-                    f"📊 *Днем:* от {payload['temp_min_c']}°C до {payload['temp_max_c']}°C\n\n"
-                    f"💧 *Осадки:* {payload['precip_sum_mm']} мм")
+        # Пробуем получить ответ от Groq
+        groq_text = await get_groq_weather(payload)
         
-        # Отправляем с Markdown форматированием
+        if groq_text and len(groq_text.split()) > 10:  # Если ответ содержательный
+            final_text = groq_text
+        else:
+            # Используем запасной вариант
+            final_text = format_weather_text(payload)
+        
         logger.info(f"✅ Отправляем прогноз для @{user.username}")
         await update.message.reply_text(
-            text,
+            final_text,
             reply_markup=keyboard,
-            parse_mode='Markdown'  # Включаем Markdown для жирного текста
+            parse_mode='Markdown'
         )
         
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Ошибка сети: {e}")
         await update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте позже.",
+            "❌ Ошибка при получении данных погоды.\n"
+            "Сервер погоды временно недоступен. Попробуйте позже.",
             reply_markup=keyboard
         )
-            return
-        
-        # Получаем погоду
-        wx = fetch_today_weather(geo["latitude"], geo["longitude"])
-        
-        # Формируем и отправляем прогноз
-        payload = build_weather_payload(geo.get("name", city), geo, wx)
-        text = groq_format_weather(payload)
-        
-        logger.info(f"✅ Отправляем прогноз для @{user.username}")
-        await update.message.reply_text(text, reply_markup=keyboard)
-        
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Неожиданная ошибка: {e}", exc_info=True)
         await update.message.reply_text(
-            "Произошла ошибка. Попробуйте позже.",
+            "❌ Произошла внутренняя ошибка.\n"
+            "Попробуйте еще раз через несколько минут.",
             reply_markup=keyboard
         )
 
 # ================== ЗАПУСК ==================
 async def main():
+    """Главная функция"""
     logger.info("🚀 Запуск бота...")
     
+    # Создаем приложение
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Добавляем обработчики
@@ -264,19 +349,28 @@ async def main():
     
     logger.info("✅ Обработчики зарегистрированы")
     
+    # Запускаем бота
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
     
-    logger.info("✅ Бот запущен и готов к работе!")
+    logger.info("✅ Бот успешно запущен и готов к работе!")
     
-    while True:
-        await asyncio.sleep(3600)
+    # Держим бота запущенным
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await app.stop()
 
+# ================== ТОЧКА ВХОДА ==================
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Бот остановлен")
+        logger.info("👋 Бот остановлен пользователем")
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
+        raise
