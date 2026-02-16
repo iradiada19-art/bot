@@ -185,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_weather(update, text)
 
 async def send_weather(update: Update, city: str):
-    """Отправка прогноза"""
+    """Отправка прогноза с правильным форматированием"""
     user = update.effective_user
     
     try:
@@ -193,9 +193,46 @@ async def send_weather(update: Update, city: str):
         geo = geocode_city(city)
         if not geo:
             await update.message.reply_text(
-                f"Город '{city}' не найден. Попробуйте еще раз:",
+                f"❌ Город '{city}' не найден. Попробуйте еще раз:",
                 reply_markup=keyboard
             )
+            return
+        
+        # Получаем погоду
+        wx = fetch_today_weather(geo["latitude"], geo["longitude"])
+        
+        # Формируем данные
+        payload = build_weather_payload(geo.get("name", city), geo, wx)
+        
+        # Пробуем получить красивый ответ от Groq
+        try:
+            text = groq_format_weather(payload)
+            logger.info(f"✅ Получен ответ от Groq: {len(text)} символов")
+        except Exception as e:
+            logger.error(f"❌ Ошибка Groq: {e}")
+            # Запасной вариант с форматированием
+            feels_like = payload.get('feels_like_c')
+            feels_text = f" (ощущается как {feels_like}°C)" if feels_like else ""
+            
+            text = (f"🌍 *{payload['location_short']}*\n\n"
+                    f"🌡️ *Сейчас:* {payload['temp_now_c']}°C, {payload['weather_desc_ru']}{feels_text}\n\n"
+                    f"📊 *Днем:* от {payload['temp_min_c']}°C до {payload['temp_max_c']}°C\n\n"
+                    f"💧 *Осадки:* {payload['precip_sum_mm']} мм")
+        
+        # Отправляем с Markdown форматированием
+        logger.info(f"✅ Отправляем прогноз для @{user.username}")
+        await update.message.reply_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'  # Включаем Markdown для жирного текста
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте позже.",
+            reply_markup=keyboard
+        )
             return
         
         # Получаем погоду
