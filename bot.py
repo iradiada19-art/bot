@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - С НАПОМИНАНИЯМИ
+# bot.py - РАБОЧАЯ ВЕРСИЯ
 
 import os
 import asyncio
 import logging
 import requests
 from groq import Groq
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.date import DateTrigger
-import re
 
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     filters,
     ContextTypes,
-    ConversationHandler,
 )
 
 # ================== НАСТРОЙКА ЛОГИРОВАНИЯ ==================
@@ -48,19 +44,10 @@ logger.info("✅ Токены успешно загружены")
 # ================== КОНСТАНТЫ ==================
 BTN_START = "Старт"
 BTN_UPDATE = "Обновить прогноз"
-BTN_REMINDERS = "Мои напоминания"
-
-# Состояния для ConversationHandler напоминаний
-(
-    REMINDER_MENU,
-    REMINDER_TEXT,
-    REMINDER_TIME,
-    REMINDER_CONFIRM,
-    REMINDER_DELETE,
-) = range(5)
+BTN_REMINDERS = "Мои напоминания"  # Добавил кнопку напоминаний
 
 # Создаем клавиатуру
-main_keyboard = ReplyKeyboardMarkup(
+keyboard = ReplyKeyboardMarkup(
     [[BTN_START, BTN_UPDATE], [BTN_REMINDERS]],
     resize_keyboard=True,
 )
@@ -70,13 +57,6 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Словарь для хранения городов пользователей
 user_cities = {}
-
-# Словарь для хранения напоминаний пользователей
-# Структура: {user_id: [{"id": 1, "text": "...", "time": "2024-01-01 12:00", "job_id": "..."}]}
-user_reminders = {}
-
-# Счетчик для ID напоминаний
-reminder_counter = 0
 
 # Словарь кодов погоды на русском
 WEATHER_CODE_RU = {
@@ -169,7 +149,7 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     }
 
 def format_weather_text(payload: dict) -> str:
-    """Форматирование текста погоды (запасной вариант)"""
+    """Форматирование текста погоды"""
     feels = payload['feels_like']
     feels_text = f" (ощущается как {feels}°C)" if feels else ""
     
@@ -199,7 +179,7 @@ def format_weather_text(payload: dict) -> str:
 
 def format_morning_text(payload: dict) -> str:
     """Утреннее приветствие с прогнозом"""
-    # Мотивирующие фразы
+    import random
     morning_phrases = [
         "☀️ Доброе утро!",
         "🌅 С добрым утром!",
@@ -207,10 +187,8 @@ def format_morning_text(payload: dict) -> str:
         "🌤 Хорошего утра!",
         "☀️ Новый день начинается!",
     ]
-    import random
     greeting = random.choice(morning_phrases)
     
-    # Короткий прогноз
     temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
     
     text = (
@@ -225,7 +203,7 @@ def format_morning_text(payload: dict) -> str:
 
 def format_evening_text(payload: dict) -> str:
     """Вечернее пожелание"""
-    # Ласковые слова
+    import random
     evening_phrases = [
         "🌙 Спокойной ночи!",
         "✨ Доброй ночи!",
@@ -233,10 +211,8 @@ def format_evening_text(payload: dict) -> str:
         "⭐ Хорошего отдыха!",
         "🌙 Приятных сновидений!",
     ]
-    import random
     greeting = random.choice(evening_phrases)
     
-    # Милые дополнения
     sweet_words = [
         "Пусть завтрашний день будет лучше сегодняшнего! 🌟",
         "Отдыхайте, вы сегодня отлично поработали! 💫",
@@ -246,7 +222,6 @@ def format_evening_text(payload: dict) -> str:
     ]
     sweet = random.choice(sweet_words)
     
-    # Короткий прогноз на завтра
     tomorrow_temp = (payload['temp_min'] + payload['temp_max']) // 2
     
     text = (
@@ -260,45 +235,15 @@ def format_evening_text(payload: dict) -> str:
 
 async def get_groq_weather(payload: dict, text_type: str = "normal") -> str | None:
     """Получение красивого описания от Groq"""
-    
     if text_type == "morning":
-        system = (
-            "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды на сегодня. "
-            "Используй данные о погоде: температуру, осадки. Добавь мотивирующую фразу. "
-            "Ответ должен быть 3-4 предложения, разделенных пустыми строками."
-        )
-        user = (
-            f"Данные о погоде для {payload['location_short']}:\n"
-            f"Сейчас: {payload['temp_now']}°C\n"
-            f"Состояние: {payload['weather_desc']}\n"
-            f"Сегодня: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
-            f"Осадки: {payload['precip']} мм\n"
-            f"Напиши утреннее приветствие с прогнозом."
-        )
+        system = "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды на сегодня."
+        user = f"Данные о погоде для {payload['location_short']}: Сейчас {payload['temp_now']}°C, {payload['weather_desc']}. Сегодня от {payload['temp_min']}°C до {payload['temp_max']}°C, осадки {payload['precip']} мм."
     elif text_type == "evening":
-        system = (
-            "Ты нежный и заботливый. Напиши короткое вечернее пожелание спокойной ночи. "
-            "Упомяни погоду сегодня и коротко на завтра. Добавь ласковые слова. "
-            "Ответ должен быть 3-4 предложения."
-        )
-        user = (
-            f"Данные о погоде для {payload['location_short']}:\n"
-            f"Сейчас: {payload['temp_now']}°C, {payload['weather_desc']}\n"
-            f"Завтра ожидается: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
-            f"Напиши вечернее пожелание."
-        )
+        system = "Ты нежный и заботливый. Напиши короткое вечернее пожелание спокойной ночи."
+        user = f"Данные о погоде для {payload['location_short']}: Сейчас {payload['temp_now']}°C, {payload['weather_desc']}. Завтра от {payload['temp_min']}°C до {payload['temp_max']}°C."
     else:
-        system = (
-            "Ты дружелюбный помощник. Дай прогноз погоды из 3-4 предложений, "
-            "разделенных пустыми строками. Без markdown."
-        )
-        user = (
-            f"Данные о погоде для {payload['location_short']}:\n"
-            f"Сейчас: {payload['temp_now']}°C, ощущается как {payload['feels_like']}°C\n"
-            f"Состояние: {payload['weather_desc']}\n"
-            f"Сегодня: от {payload['temp_min']}°C до {payload['temp_max']}°C\n"
-            f"Осадки: {payload['precip']} мм"
-        )
+        system = "Ты дружелюбный помощник. Дай прогноз погоды."
+        user = f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, ощущается как {payload['feels_like']}°C. Сегодня от {payload['temp_min']}°C до {payload['temp_max']}°C, осадки {payload['precip']} мм."
 
     try:
         completion = groq_client.chat.completions.create(
@@ -315,349 +260,15 @@ async def get_groq_weather(payload: dict, text_type: str = "normal") -> str | No
         logger.error(f"Ошибка Groq API: {e}")
         return None
 
-# ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
-def parse_time(text: str) -> datetime | None:
-    """Парсинг времени из текста"""
-    text = text.lower().strip()
-    now = datetime.now()
-    
-    # Шаблоны времени
-    patterns = [
-        # Сегодня в 15:30
-        (r'сегодня\s+в\s+(\d{1,2}):(\d{2})', lambda h, m: now.replace(hour=int(h), minute=int(m), second=0)),
-        # Завтра в 9 утра
-        (r'завтра\s+в\s+(\d{1,2})\s*(?:час|часа|часов)?\s*(?:утра|дня|вечера)?', 
-         lambda h: (now + timedelta(days=1)).replace(hour=int(h), minute=0, second=0)),
-        # Через 2 часа
-        (r'через\s+(\d+)\s*(?:час|часа|часов)', lambda h: now + timedelta(hours=int(h))),
-        # Через 30 минут
-        (r'через\s+(\d+)\s*(?:минут|минуты|минуту)', lambda m: now + timedelta(minutes=int(m))),
-        # 15:30 (сегодня если время еще не прошло, иначе завтра)
-        (r'^(\d{1,2}):(\d{2})$', lambda h, m: parse_time_short(now, int(h), int(m))),
-    ]
-    
-    for pattern, handler in patterns:
-        match = re.search(pattern, text)
-        if match:
-            try:
-                if len(match.groups()) == 2 and pattern != r'^(\d{1,2}):(\d{2})$':
-                    return handler(match.group(1), match.group(2))
-                elif len(match.groups()) == 1:
-                    return handler(match.group(1))
-                else:
-                    return handler(*match.groups())
-            except (ValueError, TypeError) as e:
-                logger.error(f"Ошибка парсинга времени: {e}")
-                continue
-    
-    return None
-
-def parse_time_short(now: datetime, hour: int, minute: int) -> datetime:
-    """Парсинг короткого формата времени (15:30)"""
-    candidate = now.replace(hour=hour, minute=minute, second=0)
-    if candidate > now:
-        return candidate
-    else:
-        return candidate + timedelta(days=1)
-
-async def send_reminder(bot, user_id: int, reminder_text: str, reminder_id: int):
-    """Отправка напоминания"""
-    try:
-        await bot.send_message(
-            chat_id=user_id,
-            text=f"⏰ *НАПОМИНАНИЕ!*\n\n{reminder_text}",
-            parse_mode='Markdown'
-        )
-        logger.info(f"✅ Напоминание {reminder_id} отправлено пользователю {user_id}")
-        
-        # Удаляем напоминание из словаря после отправки
-        if user_id in user_reminders:
-            user_reminders[user_id] = [r for r in user_reminders[user_id] if r['id'] != reminder_id]
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка при отправке напоминания {reminder_id}: {e}")
-
-# ================== ОБРАБОТЧИКИ НАПОМИНАНИЙ ==================
-async def reminders_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Меню напоминаний"""
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    if text == BTN_REMINDERS:
-        keyboard = [
-            [InlineKeyboardButton("📝 Создать напоминание", callback_data="create_reminder")],
-            [InlineKeyboardButton("📋 Мои напоминания", callback_data="list_reminders")],
-            [InlineKeyboardButton("❌ Удалить напоминание", callback_data="delete_reminder")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "📌 *Управление напоминаниями*\n\n"
-            "Выберите действие:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-        return REMINDER_MENU
-    
-    return ConversationHandler.END
-
-async def reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка нажатий кнопок в меню напоминаний"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    if query.data == "create_reminder":
-        await query.edit_message_text(
-            "📝 *Создание напоминания*\n\n"
-            "Напишите текст напоминания:",
-            parse_mode='Markdown'
-        )
-        return REMINDER_TEXT
-    
-    elif query.data == "list_reminders":
-        if user_id not in user_reminders or not user_reminders[user_id]:
-            await query.edit_message_text(
-                "📋 У вас нет активных напоминаний.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Назад", callback_data="back_to_reminders")
-                ]])
-            )
-            return REMINDER_MENU
-        
-        reminders = user_reminders[user_id]
-        text = "📋 *Ваши напоминания:*\n\n"
-        for i, rem in enumerate(reminders, 1):
-            rem_time = datetime.fromisoformat(rem['time']).strftime("%d.%m.%Y %H:%M")
-            text += f"{i}. 🕐 *{rem_time}*\n   {rem['text']}\n\n"
-        
-        await query.edit_message_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="back_to_reminders")
-            ]])
-        )
-        return REMINDER_MENU
-    
-    elif query.data == "delete_reminder":
-        if user_id not in user_reminders or not user_reminders[user_id]:
-            await query.edit_message_text(
-                "📋 У вас нет активных напоминаний для удаления.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Назад", callback_data="back_to_reminders")
-                ]])
-            )
-            return REMINDER_MENU
-        
-        # Создаем клавиатуру с напоминаниями для удаления
-        reminders = user_reminders[user_id]
-        keyboard = []
-        for rem in reminders:
-            rem_time = datetime.fromisoformat(rem['time']).strftime("%d.%m %H:%M")
-            keyboard.append([InlineKeyboardButton(
-                f"{rem_time} - {rem['text'][:20]}...",
-                callback_data=f"del_{rem['id']}"
-            )])
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_reminders")])
-        
-        await query.edit_message_text(
-            "❌ *Выберите напоминание для удаления:*",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return REMINDER_DELETE
-    
-    elif query.data.startswith("del_"):
-        reminder_id = int(query.data.replace("del_", ""))
-        
-        if user_id in user_reminders:
-            # Находим напоминание
-            reminder_to_delete = None
-            for rem in user_reminders[user_id]:
-                if rem['id'] == reminder_id:
-                    reminder_to_delete = rem
-                    break
-            
-            if reminder_to_delete:
-                # Удаляем из планировщика
-                if 'job_id' in reminder_to_delete:
-                    try:
-                        context.application.scheduler.remove_job(reminder_to_delete['job_id'])
-                    except:
-                        pass
-                
-                # Удаляем из словаря
-                user_reminders[user_id] = [r for r in user_reminders[user_id] if r['id'] != reminder_id]
-                
-                await query.edit_message_text(
-                    "✅ Напоминание удалено!",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 К напоминаниям", callback_data="back_to_reminders")
-                    ]])
-                )
-            else:
-                await query.edit_message_text(
-                    "❌ Напоминание не найдено.",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔙 Назад", callback_data="back_to_reminders")
-                    ]])
-                )
-        return REMINDER_MENU
-    
-    elif query.data == "back_to_reminders":
-        # Возврат в меню напоминаний
-        keyboard = [
-            [InlineKeyboardButton("📝 Создать напоминание", callback_data="create_reminder")],
-            [InlineKeyboardButton("📋 Мои напоминания", callback_data="list_reminders")],
-            [InlineKeyboardButton("❌ Удалить напоминание", callback_data="delete_reminder")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        await query.edit_message_text(
-            "📌 *Управление напоминаниями*\n\n"
-            "Выберите действие:",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return REMINDER_MENU
-    
-    elif query.data == "back_to_main":
-        await query.edit_message_text(
-            "👋 Возврат в главное меню",
-            reply_markup=None
-        )
-        return ConversationHandler.END
-    
-    return REMINDER_MENU
-
-async def reminder_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение текста напоминания"""
-    text = update.message.text
-    context.user_data['reminder_text'] = text
-    
-    await update.message.reply_text(
-        "🕐 *Когда напомнить?*\n\n"
-        "Напишите время в одном из форматов:\n"
-        "• `15:30` (сегодня или завтра)\n"
-        "• `сегодня в 15:30`\n"
-        "• `завтра в 9`\n"
-        "• `через 2 часа`\n"
-        "• `через 30 минут`",
-        parse_mode='Markdown'
-    )
-    return REMINDER_TIME
-
-async def reminder_time_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение времени напоминания"""
-    time_text = update.message.text
-    reminder_time = parse_time(time_text)
-    
-    if not reminder_time:
-        await update.message.reply_text(
-            "❌ Не понял время. Попробуйте еще раз:\n"
-            "• `15:30`\n"
-            "• `сегодня в 15:30`\n"
-            "• `завтра в 9`\n"
-            "• `через 2 часа`",
-            parse_mode='Markdown'
-        )
-        return REMINDER_TIME
-    
-    # Сохраняем время
-    context.user_data['reminder_time'] = reminder_time.isoformat()
-    
-    # Показываем подтверждение
-    reminder_text = context.user_data.get('reminder_text', '')
-    time_str = reminder_time.strftime("%d.%m.%Y в %H:%M")
-    
-    keyboard = [
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_reminder")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel_reminder")]
-    ]
-    
-    await update.message.reply_text(
-        f"📝 *Проверьте данные:*\n\n"
-        f"Текст: {reminder_text}\n"
-        f"Время: {time_str}\n\n"
-        f"Всё верно?",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return REMINDER_CONFIRM
-
-async def reminder_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Подтверждение создания напоминания"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "confirm_reminder":
-        user_id = query.from_user.id
-        reminder_text = context.user_data.get('reminder_text', '')
-        time_iso = context.user_data.get('reminder_time')
-        
-        if not reminder_text or not time_iso:
-            await query.edit_message_text("❌ Ошибка: данные потеряны. Попробуйте снова.")
-            return ConversationHandler.END
-        
-        reminder_time = datetime.fromisoformat(time_iso)
-        
-        # Создаем ID напоминания
-        global reminder_counter
-        reminder_counter += 1
-        reminder_id = reminder_counter
-        
-        # Создаем задачу в планировщике
-        job = context.application.scheduler.add_job(
-            send_reminder,
-            DateTrigger(run_date=reminder_time),
-            args=[context.application.bot, user_id, reminder_text, reminder_id],
-            id=f"reminder_{user_id}_{reminder_id}"
-        )
-        
-        # Сохраняем напоминание в словарь
-        if user_id not in user_reminders:
-            user_reminders[user_id] = []
-        
-        user_reminders[user_id].append({
-            'id': reminder_id,
-            'text': reminder_text,
-            'time': time_iso,
-            'job_id': job.id
-        })
-        
-        time_str = reminder_time.strftime("%d.%m.%Y в %H:%M")
-        await query.edit_message_text(
-            f"✅ *Напоминание создано!*\n\n"
-            f"Текст: {reminder_text}\n"
-            f"Время: {time_str}\n\n"
-            f"Я напомню вам в это время.",
-            parse_mode='Markdown'
-        )
-        
-        # Очищаем данные
-        context.user_data.pop('reminder_text', None)
-        context.user_data.pop('reminder_time', None)
-        
-    elif query.data == "cancel_reminder":
-        await query.edit_message_text("❌ Создание напоминания отменено.")
-    
-    return ConversationHandler.END
-
-# ================== ОБРАБОТЧИКИ РАССЫЛКИ ==================
-async def send_morning_forecast(bot, scheduler):
+# ================== ФУНКЦИИ РАССЫЛКИ ==================
+async def send_morning_forecast(bot):
     """Утренняя рассылка в 8:00"""
-    logger.info("⏰ Запуск утренней рассылки")
-    
+    logger.info("⏰ Утренняя рассылка")
     if not user_cities:
-        logger.info("Нет пользователей для рассылки")
         return
     
     for user_id, city in user_cities.items():
         try:
-            logger.info(f"Отправляем утренний прогноз для пользователя {user_id}, город {city}")
-            
             geo = geocode_city(city)
             if not geo:
                 continue
@@ -666,33 +277,22 @@ async def send_morning_forecast(bot, scheduler):
             payload = build_weather_payload(geo.get("name", city), geo, wx)
             
             text = await get_groq_weather(payload, "morning")
-            
             if not text:
                 text = format_morning_text(payload)
             
-            await bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode='Markdown'
-            )
-            logger.info(f"✅ Утренний прогноз отправлен пользователю {user_id}")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
-            
         except Exception as e:
-            logger.error(f"Ошибка при отправке утреннего прогноза пользователю {user_id}: {e}")
+            logger.error(f"Ошибка: {e}")
 
-async def send_evening_message(bot, scheduler):
+async def send_evening_message(bot):
     """Вечерняя рассылка в 22:00"""
-    logger.info("🌙 Запуск вечерней рассылки")
-    
+    logger.info("🌙 Вечерняя рассылка")
     if not user_cities:
-        logger.info("Нет пользователей для рассылки")
         return
     
     for user_id, city in user_cities.items():
         try:
-            logger.info(f"Отправляем вечернее пожелание пользователю {user_id}")
-            
             geo = geocode_city(city)
             if not geo:
                 continue
@@ -701,39 +301,24 @@ async def send_evening_message(bot, scheduler):
             payload = build_weather_payload(geo.get("name", city), geo, wx)
             
             text = await get_groq_weather(payload, "evening")
-            
             if not text:
                 text = format_evening_text(payload)
             
-            await bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode='Markdown'
-            )
-            logger.info(f"✅ Вечернее сообщение отправлено пользователю {user_id}")
+            await bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
             await asyncio.sleep(0.5)
-            
         except Exception as e:
-            logger.error(f"Ошибка при отправке вечернего сообщения пользователю {user_id}: {e}")
+            logger.error(f"Ошибка: {e}")
 
-# ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
+# ================== ОБРАБОТЧИКИ КОМАНД ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка /start"""
     user = update.effective_user
-    user_id = user.id
     logger.info(f"👉 /start от @{user.username}")
-    
-    # Удаляем сохраненный город
-    if user_id in user_cities:
-        del user_cities[user_id]
     
     await update.message.reply_text(
         f"👋 *Привет, {user.first_name}!*\n\n"
-        f"Я помогу узнать погоду в любом городе.\n"
-        f"Просто напиши название города или используй кнопки ниже.\n\n"
-        f"⏰ *Бонус:* Я буду сам присылать прогноз в 8:00 и желать спокойной ночи в 22:00!\n"
-        f"📌 *Новое:* Теперь я могу создавать напоминания!",
-        reply_markup=main_keyboard,
+        f"Я бот погоды. Напиши название города или используй кнопки.",
+        reply_markup=keyboard,
         parse_mode='Markdown'
     )
 
@@ -747,63 +332,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== ОБРАБОТКА КНОПОК =====
     if text == BTN_START:
-        logger.info(f"🔴 НАЖАТА КНОПКА: Старт")
-        if user_id in user_cities:
-            del user_cities[user_id]
-        await update.message.reply_text(
-            "Введите название города:",
-            reply_markup=main_keyboard
-        )
+        logger.info("🔴 Кнопка Старт")
+        await update.message.reply_text("Введите название города:", reply_markup=keyboard)
         return
     
     elif text == BTN_UPDATE:
-        logger.info(f"🟢 НАЖАТА КНОПКА: Обновить прогноз")
+        logger.info("🟢 Кнопка Обновить")
         if user_id not in user_cities:
-            await update.message.reply_text(
-                "Сначала введите название города!",
-                reply_markup=main_keyboard
-            )
+            await update.message.reply_text("Сначала введите город!", reply_markup=keyboard)
             return
         
         city = user_cities[user_id]
-        logger.info(f"🔄 Обновляем прогноз для города: {city}")
-        await update.message.reply_text(
-            f"🔄 Обновляю прогноз для *{city}*...",
-            reply_markup=main_keyboard,
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"Обновляю прогноз для {city}...", reply_markup=keyboard)
         await send_weather(update, city)
         return
     
     elif text == BTN_REMINDERS:
-        # Передаем в ConversationHandler напоминаний
-        await reminders_menu(update, context)
+        logger.info("🔵 Кнопка Напоминания")
+        await update.message.reply_text(
+            "📌 *Напоминания*\n\n"
+            "Эта функция пока в разработке. Скоро тут можно будет создавать напоминания!",
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
         return
     
     # ===== ОБРАБОТКА ВВОДА ГОРОДА =====
     logger.info(f"🏙️ Ввод города: {text}")
-    
-    # Сохраняем город
     user_cities[user_id] = text
-    
-    await update.message.reply_text(
-        f"🔍 Ищу погоду для *{text}*...",
-        reply_markup=main_keyboard,
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text(f"Ищу погоду для {text}...", reply_markup=keyboard)
     await send_weather(update, text)
 
 async def send_weather(update: Update, city: str):
     """Отправка прогноза"""
-    user = update.effective_user
-    
     try:
         geo = geocode_city(city)
         if not geo:
             await update.message.reply_text(
-                f"❌ Город *'{city}'* не найден.\n\nПопробуйте написать по-другому.",
-                reply_markup=main_keyboard,
-                parse_mode='Markdown'
+                f"❌ Город '{city}' не найден.",
+                reply_markup=keyboard
             )
             return
         
@@ -812,17 +379,58 @@ async def send_weather(update: Update, city: str):
         
         groq_text = await get_groq_weather(payload, "normal")
         
-        if groq_text and len(groq_text.split()) > 10:
+        if groq_text:
             final_text = groq_text
         else:
             final_text = format_weather_text(payload)
         
-        logger.info(f"✅ Отправляем прогноз для @{user.username}")
-        await update.message.reply_text(
-            final_text,
-            reply_markup=main_keyboard,
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(final_text, reply_markup=keyboard, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"❌ Ошибка: {e}")
+        await update.message.reply_text("❌ Ошибка. Попробуйте позже.", reply_markup=keyboard)
+
+# ================== ЗАПУСК ==================
+async def main():
+    """Главная функция"""
+    logger.info("🚀 Запуск бота...")
+    
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Добавляем обработчики
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    logger.info("✅ Обработчики зарегистрированы")
+    
+    # Запускаем бота
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    
+    logger.info("✅ Бот запущен")
+    
+    # Планировщик для рассылок
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(send_morning_forecast, CronTrigger(hour=8, minute=0), args=[app.bot])
+    scheduler.add_job(send_evening_message, CronTrigger(hour=22, minute=0), args=[app.bot])
+    scheduler.start()
+    logger.info("⏰ Планировщик запущен")
+    
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        scheduler.shutdown()
+        await app.stop()
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Бот остановлен")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        raise
