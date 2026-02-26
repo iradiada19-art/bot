@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# bot.py - ПОЛНАЯ ВЕРСИЯ С УЛУЧШЕННЫМИ ДАТАМИ (КНОПКА "ПОБОЛТАТЬ" ВРЕМЕННО УБРАНА) + ФИКС УДАЛЕНИЯ ЗАМЕТОК
+# bot.py - ПОЛНАЯ ВЕРСИЯ: убрана кнопка "Поболтать" + фикс удаления заметок
+# + добавлен ветер в прогноз + добавлена последняя строка со статистикой min/max
 
 import json
 import os
@@ -55,9 +56,8 @@ BTN_START = "Узнать погоду"
 BTN_UPDATE = "Обновить прогноз"
 BTN_REMINDERS = "Напоминания"
 BTN_NOTES = "Мои заметки"
-# BTN_CHAT = "Поболтать"  # временно убрали
 
-# Главная клавиатура (без кнопки "Поболтать")
+# Главная клавиатура (без "Поболтать")
 main_keyboard = ReplyKeyboardMarkup(
     [[BTN_START, BTN_UPDATE], [BTN_REMINDERS, BTN_NOTES]],
     resize_keyboard=True,
@@ -75,7 +75,7 @@ notes_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Инициализация Groq клиента (для погоды/текста; чат-кнопку убрали, но клиент может быть нужен)
+# Инициализация Groq клиента (используется для генерации текста погоды)
 try:
     groq_client = Groq(api_key=GROQ_API_KEY)
     logger.info("✅ Groq клиент инициализирован")
@@ -93,7 +93,6 @@ notes_counter = 0
 # Состояния пользователей
 # main / reminders / notes / new_note / deleting_note
 user_state = {}         # {user_id: "main", ...}
-user_chat_history = {}  # оставили на будущее, но сейчас чат-кнопки нет
 
 # Планировщик
 scheduler = None
@@ -130,10 +129,7 @@ WEATHER_CODE_RU = {
 def save_reminders():
     """Сохраняет напоминания в файл"""
     try:
-        save_data = {}
-        for uid, reminders in user_reminders.items():
-            save_data[str(uid)] = reminders
-
+        save_data = {str(uid): reminders for uid, reminders in user_reminders.items()}
         with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
 
@@ -141,7 +137,7 @@ def save_reminders():
         logger.info(f"💾 Напоминания сохранены. Всего: {total}")
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения: {e}")
+        logger.error(f"❌ Ошибка сохранения напоминаний: {e}")
         return False
 
 
@@ -158,8 +154,7 @@ def load_reminders():
             max_id = 0
             for reminders in user_reminders.values():
                 for rem in reminders:
-                    if rem['id'] > max_id:
-                        max_id = rem['id']
+                    max_id = max(max_id, rem.get('id', 0))
             reminder_counter = max_id
 
             total = sum(len(v) for v in user_reminders.values())
@@ -167,17 +162,14 @@ def load_reminders():
         else:
             user_reminders = {}
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки: {e}")
+        logger.error(f"❌ Ошибка загрузки напоминаний: {e}")
         user_reminders = {}
 
 
 def save_notes():
     """Сохраняет заметки в файл"""
     try:
-        save_data = {}
-        for uid, notes in user_notes.items():
-            save_data[str(uid)] = notes
-
+        save_data = {str(uid): notes for uid, notes in user_notes.items()}
         with open(NOTES_FILE, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
 
@@ -185,7 +177,7 @@ def save_notes():
         logger.info(f"💾 Заметки сохранены. Всего: {total}")
         return True
     except Exception as e:
-        logger.error(f"❌ Ошибка сохранения: {e}")
+        logger.error(f"❌ Ошибка сохранения заметок: {e}")
         return False
 
 
@@ -202,8 +194,7 @@ def load_notes():
             max_id = 0
             for notes in user_notes.values():
                 for note in notes:
-                    if note['id'] > max_id:
-                        max_id = note['id']
+                    max_id = max(max_id, note.get('id', 0))
             notes_counter = max_id
 
             total = sum(len(v) for v in user_notes.values())
@@ -211,9 +202,8 @@ def load_notes():
         else:
             user_notes = {}
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки: {e}")
+        logger.error(f"❌ Ошибка загрузки заметок: {e}")
         user_notes = {}
-
 
 # ================== ФУНКЦИИ ПОГОДЫ ==================
 def geocode_city(city: str) -> dict | None:
@@ -232,12 +222,12 @@ def geocode_city(city: str) -> dict | None:
 
 
 def fetch_today_weather(lat: float, lon: float) -> dict:
-    """Получение погоды"""
+    """Получение погоды (добавлен ветер wind_speed_10m)"""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "current": "temperature_2m,weather_code,apparent_temperature",
+        "current": "temperature_2m,weather_code,apparent_temperature,wind_speed_10m",
         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
         "timezone": "auto",
         "forecast_days": 1,
@@ -270,6 +260,7 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
         "location_short": city_label,
         "temp_now": current.get("temperature_2m"),
         "feels_like": current.get("apparent_temperature"),
+        "wind_speed": current.get("wind_speed_10m"),  # <-- добавили ветер
         "temp_min": (daily.get("temperature_2m_min") or [None])[0],
         "temp_max": (daily.get("temperature_2m_max") or [None])[0],
         "precip": (daily.get("precipitation_sum") or [0])[0],
@@ -278,12 +269,25 @@ def build_weather_payload(city_label: str, geo: dict, wx: dict) -> dict:
     }
 
 
+def _append_minmax_stats(text: str, payload: dict) -> str:
+    """Добавляет последней строкой статистику минимума/максимума температуры"""
+    tmin = payload.get("temp_min")
+    tmax = payload.get("temp_max")
+    if tmin is None or tmax is None:
+        return text.rstrip()
+    # Последней строкой (без лишних строк после)
+    return text.rstrip() + f"\n\n📈 *Статистика дня:* минимум {tmin}°C / максимум {tmax}°C"
+
+
 def format_weather_text(payload: dict) -> str:
-    """Форматирование текста погоды"""
-    feels = payload['feels_like']
+    """Локальное форматирование текста погоды (с ветром)"""
+    feels = payload.get('feels_like')
     feels_text = f" (ощущается как {feels}°C)" if feels is not None else ""
 
-    temp = payload['temp_now']
+    wind = payload.get("wind_speed")
+    wind_text = f"🌬️ *Ветер:* {wind} м/с\n\n" if wind is not None else ""
+
+    temp = payload.get('temp_now')
     if temp is None:
         advice = "💡 Совет: проверь город ещё раз — данные не пришли."
     elif temp < -20:
@@ -299,31 +303,38 @@ def format_weather_text(payload: dict) -> str:
     else:
         advice = "👕 Тепло. Легкая одежда подойдет."
 
-    return (
+    base = (
         f"📍 *{payload['location_short']}*\n\n"
         f"🌡️ *Сейчас:* {payload['temp_now']}°C {payload['weather_desc']}{feels_text}\n\n"
-        f"📊 *Днем:* от {payload['temp_min']}°C до {payload['temp_max']}°C\n\n"
+        f"{wind_text}"
         f"💧 *Осадки:* {payload['precip']} мм\n\n"
         f"💡 *Совет:* {advice}"
     )
+    return _append_minmax_stats(base, payload)
 
 
 def format_morning_text(payload: dict) -> str:
     """Утреннее приветствие"""
     import random
     phrases = ["☀️ Доброе утро!", "🌅 С добрым утром!", "☀️ Просыпайся!"]
-    if payload['temp_min'] is None or payload['temp_max'] is None:
-        temp_avg = "—"
-    else:
+
+    wind = payload.get("wind_speed")
+    wind_line = f"🌬️ Ветер: {wind} м/с\n" if wind is not None else ""
+
+    temp_avg = "—"
+    if payload.get('temp_min') is not None and payload.get('temp_max') is not None:
         temp_avg = (payload['temp_min'] + payload['temp_max']) // 2
-    return (
+
+    base = (
         f"{random.choice(phrases)}\n\n"
         f"📅 *Прогноз на сегодня:*\n"
         f"{payload['weather_desc']}\n"
         f"🌡️ Средняя температура: {temp_avg}°C\n"
+        f"{wind_line}"
         f"💧 Осадки: {payload['precip']} мм\n\n"
         f"💪 Хорошего дня!"
     )
+    return _append_minmax_stats(base, payload)
 
 
 def format_evening_text(payload: dict) -> str:
@@ -331,42 +342,67 @@ def format_evening_text(payload: dict) -> str:
     import random
     phrases = ["🌙 Спокойной ночи!", "✨ Доброй ночи!", "🌙 Сладких снов!"]
     sweet = ["Сны пусть будут радужными! 🌈", "Отдыхай! 💫", "До завтра! ⭐"]
-    if payload['temp_min'] is None or payload['temp_max'] is None:
-        tomorrow_temp = "—"
-    else:
+
+    tomorrow_temp = "—"
+    if payload.get('temp_min') is not None and payload.get('temp_max') is not None:
         tomorrow_temp = (payload['temp_min'] + payload['temp_max']) // 2
-    return (
+
+    wind = payload.get("wind_speed")
+    wind_line = f"🌬️ Ветер сейчас: {wind} м/с\n" if wind is not None else ""
+
+    base = (
         f"{random.choice(phrases)}\n\n"
         f"📊 *Сегодня:* {payload['temp_now']}°C, {payload['weather_desc']}\n"
+        f"{wind_line}"
         f"💫 *Завтра:* ~{tomorrow_temp}°C\n\n"
         f"{random.choice(sweet)}"
     )
+    return _append_minmax_stats(base, payload)
 
 
 async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
-    """Получение текста погоды"""
+    """Получение текста погоды (Groq + fallback), в конце добавляет min/max статистику"""
     if groq_client:
         try:
             if text_type == "morning":
-                system = "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды. Используй данные о погоде. Ответ должен быть тёплым и дружелюбным."
-                user = f"В {payload['location_short']} сегодня {payload['temp_min']}-{payload['temp_max']}°C, {payload['weather_desc']}, осадки {payload['precip']} мм."
+                system = (
+                    "Ты доброе утро. Напиши короткое утреннее приветствие с прогнозом погоды. "
+                    "Используй данные о погоде. Ответ должен быть тёплым и дружелюбным."
+                )
+                user = (
+                    f"В {payload['location_short']} сегодня {payload['temp_min']}-{payload['temp_max']}°C, "
+                    f"{payload['weather_desc']}, ветер {payload.get('wind_speed')} м/с, осадки {payload['precip']} мм."
+                )
             elif text_type == "evening":
-                system = "Ты нежный и заботливый. Напиши вечернее пожелание спокойной ночи. Упомяни погоду сегодня и коротко на завтра. Добавь ласковые слова."
-                user = f"Сегодня было {payload['temp_now']}°C, {payload['weather_desc']}. Завтра {payload['temp_min']}-{payload['temp_max']}°C."
+                system = (
+                    "Ты нежный и заботливый. Напиши вечернее пожелание спокойной ночи. "
+                    "Упомяни погоду сегодня и коротко на завтра. Добавь ласковые слова."
+                )
+                user = (
+                    f"Сегодня было {payload['temp_now']}°C, {payload['weather_desc']}, "
+                    f"ветер {payload.get('wind_speed')} м/с. Завтра {payload['temp_min']}-{payload['temp_max']}°C."
+                )
             else:
-                system = "Ты дружелюбный помощник. Дай прогноз погоды на сегодня. Используй данные о температуре, осадках и ощущениях."
-                user = f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, ощущается как {payload['feels_like']}°C. Днем {payload['temp_min']}-{payload['temp_max']}°C, осадки {payload['precip']} мм."
+                system = (
+                    "Ты дружелюбный помощник. Дай прогноз погоды на сегодня. "
+                    "Используй данные о температуре, осадках, ощущениях и ветре."
+                )
+                user = (
+                    f"В {payload['location_short']} сейчас {payload['temp_now']}°C, {payload['weather_desc']}, "
+                    f"ощущается как {payload['feels_like']}°C, ветер {payload.get('wind_speed')} м/с. "
+                    f"Днем {payload['temp_min']}-{payload['temp_max']}°C, осадки {payload['precip']} мм."
+                )
 
             completion = groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                 temperature=0.7,
-                max_tokens=200,
+                max_tokens=220,
             )
             groq_text = completion.choices[0].message.content.strip()
             if groq_text and len(groq_text) > 20:
                 logger.info(f"✅ Получен ответ от Groq для {text_type}")
-                return groq_text
+                return _append_minmax_stats(groq_text, payload)
         except Exception as e:
             logger.error(f"❌ Ошибка Groq: {e}")
 
@@ -378,106 +414,56 @@ async def get_weather_text(payload: dict, text_type: str = "normal") -> str:
     else:
         return format_weather_text(payload)
 
-
-# ================== ФУНКЦИИ ЧАТА (ОСТАВЛЕНО НА БУДУЩЕЕ, КНОПКИ НЕТ) ==================
-async def chat_with_groq(user_id: int, message: str) -> str:
-    """Общение с Groq"""
-    if not groq_client:
-        return "Извини, я сейчас не могу общаться. Проблемы с подключением к нейросети."
-
-    try:
-        if user_id not in user_chat_history:
-            user_chat_history[user_id] = [
-                {"role": "system", "content": "Ты дружелюбный собеседник. Отвечай кратко, но по делу. Ты общаешься с хорошим другом."}
-            ]
-
-        user_chat_history[user_id].append({"role": "user", "content": message})
-
-        if len(user_chat_history[user_id]) > 11:
-            user_chat_history[user_id] = [user_chat_history[user_id][0]] + user_chat_history[user_id][-10:]
-
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=user_chat_history[user_id],
-            temperature=0.8,
-            max_tokens=300,
-        )
-
-        reply = completion.choices[0].message.content.strip()
-        user_chat_history[user_id].append({"role": "assistant", "content": reply})
-
-        return reply
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка чата: {e}")
-        return f"Ой, что-то пошло не так. Ошибка: {str(e)}"
-
-
 # ================== ФУНКЦИИ НАПОМИНАНИЙ ==================
 def parse_time(text: str) -> datetime | None:
     """Парсинг времени из текста с учетом московского времени"""
     now = datetime.now(MSK_TZ)
     text = text.lower().strip()
 
-    # ===== ЧЕРЕЗ X МИНУТ =====
     match = re.search(r'через\s+(\d+)\s*(минут|минуты|минуту)', text)
     if match:
         minutes = int(match.group(1))
-        if minutes < 1:
-            minutes = 1
-        elif minutes > 10080:
-            minutes = 10080
+        minutes = max(1, min(minutes, 10080))
         return now + timedelta(minutes=minutes)
 
-    # ===== ЧЕРЕЗ МИНУТУ =====
     if 'через минуту' in text:
         return now + timedelta(minutes=1)
 
-    # ===== ЧЕРЕЗ X ЧАСОВ =====
     match = re.search(r'через\s+(\d+)\s*(час|часа|часов)', text)
     if match:
         hours = int(match.group(1))
-        if hours > 168:
-            hours = 168
+        hours = min(hours, 168)
         return now + timedelta(hours=hours)
 
-    # ===== ЧЕРЕЗ ЧАС =====
     if 'через час' in text:
         return now + timedelta(hours=1)
 
-    # ===== ПОСЛЕЗАВТРА В 13:00 =====
     match = re.search(r'послезавтра\s+в\s+(\d{1,2}):(\d{2})', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
         return (now + timedelta(days=2)).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # ===== ПОСЛЕЗАВТРА =====
     if 'послезавтра' in text:
         return (now + timedelta(days=2)).replace(hour=9, minute=0, second=0, microsecond=0)
 
-    # ===== ЗАВТРА В 13:00 =====
     match = re.search(r'завтра\s+в\s+(\d{1,2}):(\d{2})', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
         return (now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # ===== ЗАВТРА В 9 =====
     match = re.search(r'завтра\s+в\s+(\d{1,2})', text)
     if match:
         hour = int(match.group(1))
         return (now + timedelta(days=1)).replace(hour=hour, minute=0, second=0, microsecond=0)
 
-    # ===== ЗАВТРА =====
     if 'завтра' in text:
         return (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
 
-    # ===== СЕГОДНЯ В 15:30 =====
     match = re.search(r'сегодня\s+в\s+(\d{1,2}):(\d{2})', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
         return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # ===== ДАТА 18.02 В 13:00 =====
     match = re.search(r'(\d{1,2})\.(\d{1,2})\s+в\s+(\d{1,2}):(\d{2})', text)
     if match:
         day, month, hour, minute = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
@@ -492,7 +478,6 @@ def parse_time(text: str) -> datetime | None:
         except ValueError:
             return None
 
-    # ===== ДАТА 18.02 =====
     match = re.search(r'^(\d{1,2})\.(\d{1,2})$', text)
     if match:
         day, month = int(match.group(1)), int(match.group(2))
@@ -507,7 +492,6 @@ def parse_time(text: str) -> datetime | None:
         except ValueError:
             return None
 
-    # ===== ПРОСТО ВРЕМЯ 15:30 =====
     match = re.search(r'^(\d{1,2}):(\d{2})$', text)
     if match:
         hour, minute = int(match.group(1)), int(match.group(2))
@@ -533,7 +517,6 @@ async def send_reminder(bot, user_id: int, text: str, reminder_id: int):
 
     except Exception as e:
         logger.error(f"❌ Ошибка отправки напоминания: {e}")
-
 
 # ================== РАССЫЛКИ ==================
 async def send_morning_forecast(bot):
@@ -580,7 +563,6 @@ async def send_evening_message(bot):
             await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"❌ Ошибка вечерней рассылки: {e}")
-
 
 # ================== ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -946,7 +928,6 @@ async def send_weather(update: Update, city: str):
     except Exception as e:
         logger.error(f"❌ Ошибка погоды: {e}")
         await update.message.reply_text("❌ Ошибка. Попробуй позже.", reply_markup=main_keyboard)
-
 
 # ================== ЗАПУСК ==================
 async def main():
